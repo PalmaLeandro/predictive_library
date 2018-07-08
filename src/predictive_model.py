@@ -54,6 +54,32 @@ def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=[-3.,
 
     ax.set_aspect('equal', 'box')
 
+
+def plot_confusion_matrix_heatmap(classifications, labels, classes_labels=None, show_plot=False):
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from sklearn.metrics import confusion_matrix
+    classes_labels = classes_labels \
+        if classes_labels is not None \
+        else [str(label) for label in np.unique(labels)]
+    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels,
+                                                        y_pred=np.array(classifications)[:, 0].tolist()),
+                                       columns=classes_labels, index=classes_labels)
+    # Calculate percentages.
+    confusion_matrix_df = confusion_matrix_df.div(confusion_matrix_df.sum(axis=1), axis=0)
+    # Calculate accuracy.
+    confusion_matrix_df['Accuracy'] = [row[row_index] / np.sum([x for x in row])
+                                       for row_index, row
+                                       in confusion_matrix_df.iterrows()]
+    sns.heatmap(confusion_matrix_df, annot=True, ax=plt.subplots(figsize=(18, 10))[1],
+                cmap=sns.color_palette("Blues"))
+    plt.xticks(rotation=0)
+    plt.yticks(rotation=0)
+    if show_plot: plt.show()
+    return confusion_matrix_df
+
+
 sigmoid = lambda x: 1 / (1 + math.exp(-x))
 
 # Vectorized form
@@ -111,9 +137,11 @@ def validate_train_labels(labels):
                 labels = np.append(labels, np.array([label]))
     return labels
 
+
 def get_current_machine_ip():
     import socket
     return socket.gethostbyname(socket.gethostname())
+
 
 class PredictiveModel(object):
 
@@ -185,7 +213,6 @@ class PredictiveModel(object):
         # ps_process = Process(target=ps, args=(self._cluster, self._task_index))
         # ps_process.start()
 
-
     def _init_summaries(self, log_dir=None, erase_log_dir=True):
         if log_dir is not None:
             self._summaries_op = tf.summary.merge_all()
@@ -197,19 +224,19 @@ class PredictiveModel(object):
             self._summaries_op = tf.no_op()
             self._train_summary_writer = self._validation_summary_writer = self._test_summary_writer = None
 
-
-    def _build_model(self, inputs, **kwargs):
+    def build_model(self, inputs, **kwargs):
         '''
         Defines the model that infers an output given the provided input.
         Needs to be implemented by subclasses.
         '''
-        pass
+        return tf.identity(inputs, name=self.name)
 
-    def _build_loss(self, label, **kwargs):
+    def build_loss(self, label, **kwargs):
         return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op, labels=label),
                               name='xentropy_mean')
 
-    def _build_training(self, max_gradient_norm=5.):
+
+    def build_training(self, max_gradient_norm=5.):
         '''Defines Gradient Descent with clipped norms as default training method.'''
         tvars = tf.trainable_variables()
         grads, _ = tf.clip_by_global_norm(tf.gradients(self._loss_op, tvars), max_gradient_norm)
@@ -217,7 +244,7 @@ class PredictiveModel(object):
         return optimizer.apply_gradients(zip(grads, tvars))
 
     # TODO: implement minibatch training with data folding.
-    def _report_execution(self, samples, labels, operation, summary_writer=None):
+    def report_execution(self, samples, labels, operation, summary_writer=None):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         losses = []
         results = []
@@ -233,7 +260,7 @@ class PredictiveModel(object):
                 summary_writer.add_summary(summaries, global_step=self._session.run(self._global_step))
                 summary_writer.flush()
 
-            epoch_completion_perc = sample_index / len(samples) * 100.
+            epoch_completion_perc = float(sample_index / len(samples)) * 100.
             if epoch_completion_perc % 10 == 0:
                 logging.info('Epoch completion: {}%'.format(int(epoch_completion_perc)))
 
@@ -275,11 +302,15 @@ class PredictiveModel(object):
 
                     self.save()
 
-    def test(self, samples, labels):
-        if self._task_index > 0:
-            # Test model's performance.
-            logging.info('Test.')
-            self._report_execution(samples, labels, self._do_nothing_op, self._test_summary_writer)
+    def test(self, samples, labels, classes_labels=None):
+        # Test model's performance.
+        logging.info('Test.')
+        classifications = self.report_execution(samples, labels,
+                                                operation=tf.argmax(self._inference_op, axis=1),
+                                                summary_writer=self._test_summary_writer)
+
+        confusion_matrix_df = plot_confusion_matrix_heatmap(classifications, labels, classes_labels)
+        return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
         if self._task_index > 0:
@@ -338,8 +369,9 @@ class PredictiveModel(object):
         for (hyperplanes_names, hyperplanes_weights, hyperplanes_bias) in zip(hyperplanes_names,
                                                                               hyperplanes_weights,
                                                                               hyperplanes_biases):
-            for hyperplane_index, (hyperplane_weights, hyperplane_bias) in enumerate(zip(hyperplanes_weights.transpose(),
-                                                                                         hyperplanes_bias)):
+            for hyperplane_index, \
+                (hyperplane_weights, hyperplane_bias) in enumerate(zip(hyperplanes_weights.transpose(),
+                                                                       hyperplanes_bias)):
                 plot_hyperplane(weights=hyperplane_weights,
                                 bias=hyperplane_bias,
                                 label=hyperplanes_names + '_hyperplane_' + str(hyperplane_index),
@@ -349,6 +381,28 @@ class PredictiveModel(object):
         if ax_arg is None:
             plt.show()
 
+
+class FastFourierTransform(PredictiveModel):
+
+    def build_model(self, inputs, **kwargs):
+        num_steps = inputs.get_shape().dims[1].value
+        next_2_base = 2 ** (int(np.log2(num_steps)) + 1)
+        return super(FastFourierTransform, self)\
+               .build_model(tf.cast(tf.transpose(tf.spectral.rfft(tf.transpose(inputs, [0, 2, 1]),
+                                                                  fft_length=[next_2_base]), [0, 2, 1]),
+                                    tf.float32))
+
+
+class BatchReshape(PredictiveModel):
+
+    def build_model(self, inputs, batch_size, new_shape=-1, **kwargs):
+        return super(BatchReshape, self).build_model(tf.reshape(inputs, [batch_size, new_shape]))
+
+
+class SigmoidActivation(PredictiveModel):
+
+    def build_model(self, inputs, **kwargs):
+        return super(SigmoidActivation, self).build_model(tf.nn.sigmoid(inputs))
 
 
 class DeepPredictiveModel(PredictiveModel):
@@ -362,8 +416,7 @@ class DeepPredictiveModel(PredictiveModel):
         super(DeepPredictiveModel, self).__init__(num_features, batch_size,
                                                   inner_models_arguments=inner_models_arguments, **kwargs)
 
-    def _build_model(self, inputs, inner_models_classes, inner_models_arguments=None, **kwargs):
-
+    def build_model(self, inputs, inner_models_classes, inner_models_arguments=None, **kwargs):
         current_input = inputs
         current_input_dimension = [int(dimension) for dimension in inputs.get_shape().dims[1:]]
         self.inner_models_names = []
@@ -374,7 +427,8 @@ class DeepPredictiveModel(PredictiveModel):
             inner_model = inner_model_class(is_inner_model=True, **inner_model_arguments)
             inner_model_name = inner_model.name + '_' + str(inner_model_index)
             with tf.variable_scope(inner_model_name):
-                current_input = inner_model._build_model(current_input, **inner_model_arguments)
+                current_input = inner_model.build_model(current_input, **inner_model_arguments)
+
                 current_input_dimension = [int(dimension) for dimension in current_input.get_shape().dims[1:]]
 
             self.inner_models_names.append(inner_model_name)
@@ -401,8 +455,8 @@ class PredictiveSequenceModel(PredictiveModel):
         '''
         pass
 
+    def build_model(self, input_sequence, **kwargs):
 
-    def _build_model(self, input_sequence, **kwargs):
         '''
         Executes the model inference over each step of the inputs, evolving the model's internal representation,
         and outputs the final representation as result.
@@ -427,7 +481,8 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
                                                                         inner_sequence_models_arguments):
             inner_sequence_model.reset(**inner_sequence_model_arguments)
 
-    def _build_model(self, input_sequence, inner_sequence_models_classes, inner_sequence_models_arguments=None, **kwargs):
+    def build_model(self, input_sequence, inner_sequence_models_classes, inner_sequence_models_arguments=None,
+                    **kwargs):
         # Define if user provided arguments for every model or they would have to share the same.
         inner_sequence_models_arguments = inner_sequence_models_arguments \
                                           or np.repeat(kwargs, len(inner_sequence_models_classes))
@@ -442,9 +497,10 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
             self.inner_models_names.append(inner_model.name)
 
         return super(DeepPredictiveSequenceModel,
-                     self)._build_model(input_sequence,
-                                        inner_sequence_models_arguments=inner_sequence_models_arguments,
-                                        **kwargs)
+                     self).build_model(input_sequence,
+                                       inner_sequence_models_arguments=inner_sequence_models_arguments,
+                                       **kwargs)
+
 
     def _build_model_evolution(self, input, inner_sequence_models_arguments, **kwargs):
         current_input = input
@@ -455,7 +511,6 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
                                                                             **inner_sequence_model_arguments)
 
         return current_input
-
 
 
 class PredictiveRecurrentModel(PredictiveSequenceModel):
@@ -483,18 +538,20 @@ class PredictiveRecurrentModel(PredictiveSequenceModel):
 
 
 class LinearNN(PredictiveModel):
-    def _build_model(self, inputs, num_units, **kwargs):
-        return linear_neurons_layer(inputs, num_units, 'BasicNN/weights')
+
+    def build_model(self, inputs, num_units, **kwargs):
+        return super(LinearNN, self).build_model(linear_neurons_layer(inputs, num_units, self.name))
 
 
 class Dropout(PredictiveSequenceModel):
-    def _build_model(self, inputs, keep_prob, **kwargs):
+
+    def build_model(self, inputs, keep_prob, **kwargs):
         return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
 
-    def _build_training(self, **kwargs):
+    def build_training(self, **kwargs):
         return tf.no_op()
 
-    def _build_loss(self, label, **kwargs):
+    def build_loss(self, label, **kwargs):
         return tf.no_op()
 
     def _build_model_evolution(self, inputs, keep_prob, **kwargs):
@@ -502,6 +559,7 @@ class Dropout(PredictiveSequenceModel):
 
 
 class BasicRNN(PredictiveRecurrentModel):
+
     def _build_recurrent_model(self, inputs, state, **kwargs):
         current_inputs = inputs
         if inputs.get_shape().dims[1].value != state.get_shape().dims[1].value:
@@ -514,7 +572,9 @@ class BasicRNN(PredictiveRecurrentModel):
 
 
 class IterativeNN(PredictiveModel):
-    def _build_model(self, input, num_units, max_it, **kwargs):
+
+    def build_model(self, input, num_units, max_it, **kwargs):
+
         weights = tf.get_variable(name='weights', shape=[input.get_shape().dims[1].value, num_units])
         bias = tf.get_variable(name='bias', shape=[num_units])
         weights_norm = tf.norm(weights)
