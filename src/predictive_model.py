@@ -171,10 +171,10 @@ class PredictiveModel(object):
                     self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
                     inputs = tf.placeholder(dtype=tf.float32, shape=[batch_size, *num_features], name='inputs')
                     label = tf.placeholder(dtype=tf.int64, shape=[batch_size], name='label')
-                    self._inference_op = self._build_model(inputs, num_features=num_features,
+                    self._inference_op = self.build_model(inputs, num_features=num_features,
                                                            batch_size=batch_size, **kwargs)
-                    self._loss_op = self._build_loss(label, **kwargs)
-                    self._train_op = self._build_training()
+                    self._loss_op = self.build_loss(label, **kwargs)
+                    self._train_op = self.build_training()
                     self._init_summaries(log_dir, erase_log_dir)
                     self._do_nothing_op = tf.no_op()
 
@@ -446,7 +446,7 @@ class DeepPredictiveModel(PredictiveModel):
 class PredictiveSequenceModel(PredictiveModel):
     '''A model that makes inferences over a sequenced input.'''
 
-    def _build_model_evolution(self, input, **kwargs):
+    def build_model_evolution(self, input, **kwargs):
         pass
 
     def reset(self, **kwargs):
@@ -466,7 +466,7 @@ class PredictiveSequenceModel(PredictiveModel):
         result = tf.no_op()
         self.reset(**kwargs)
         for step in range(input_sequence.shape[1]):
-            result = self._build_model_evolution(input_sequence[:, step, :], **kwargs)
+            result = self.build_model_evolution(input_sequence[:, step, :], **kwargs)
             # Avoid instantiating all the reusable variables again.
             tf.get_variable_scope().reuse_variables()
 
@@ -502,12 +502,12 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
                                        **kwargs)
 
 
-    def _build_model_evolution(self, input, inner_sequence_models_arguments, **kwargs):
+    def build_model_evolution(self, input, inner_sequence_models_arguments, **kwargs):
         current_input = input
         iterator = enumerate(zip(self._inner_sequence_models, inner_sequence_models_arguments))
         for inner_sequence_model_index, (inner_sequence_model, inner_sequence_model_arguments) in iterator:
             with tf.variable_scope(inner_sequence_model.name + '_' + str(inner_sequence_model_index)):
-                current_input = inner_sequence_model._build_model_evolution(current_input,
+                current_input = inner_sequence_model.build_model_evolution(current_input,
                                                                             **inner_sequence_model_arguments)
 
         return current_input
@@ -529,7 +529,7 @@ class PredictiveRecurrentModel(PredictiveSequenceModel):
         '''
         pass
 
-    def _build_model_evolution(self, input, **kwargs):
+    def build_model_evolution(self, input, **kwargs):
         output, self.state = self._build_recurrent_model(input, self.state, **kwargs)
         return output
 
@@ -554,7 +554,7 @@ class Dropout(PredictiveSequenceModel):
     def build_loss(self, label, **kwargs):
         return tf.no_op()
 
-    def _build_model_evolution(self, inputs, keep_prob, **kwargs):
+    def build_model_evolution(self, inputs, keep_prob, **kwargs):
         return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
 
 
