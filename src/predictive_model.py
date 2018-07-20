@@ -60,12 +60,17 @@ def plot_confusion_matrix_heatmap(classifications, labels, classes_labels=None, 
     import matplotlib.pyplot as plt
     import pandas as pd
     from sklearn.metrics import confusion_matrix
-    classes_labels = classes_labels \
-        if classes_labels is not None \
-        else [str(label) for label in np.unique(labels)]
-    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels,
-                                                        y_pred=np.array(classifications)[:, 0].tolist()),
-                                       columns=classes_labels, index=classes_labels)
+
+    classes_labels = classes_labels if classes_labels is not None else [str(label) for label in np.unique(labels)]
+    predictions = np.array(classifications)[:, 0].tolist()
+
+    classes_present = [classes_labels[class_idx]
+                       for class_idx
+                       in np.unique(np.array(np.unique(labels).tolist() + np.unique(predictions).tolist()))]
+
+    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels, y_pred=predictions),
+                                       columns=classes_present, index=classes_present)
+
     # Calculate percentages.
     confusion_matrix_df = confusion_matrix_df.div(confusion_matrix_df.sum(axis=1), axis=0)
     # Calculate accuracy.
@@ -143,9 +148,17 @@ def get_current_machine_ip():
     return socket.gethostbyname(socket.gethostname())
 
 
+def log10(x):
+  numerator = tf.log(x)
+  denominator = tf.log(tf.constant(10, dtype=numerator.dtype))
+  return numerator / denominator
+
+next_2_base = lambda x: 2 ** (int(np.log2(x)) + 1)
+
+
 class PredictiveModel(object):
 
-    def __init__(self, num_features=None, batch_size=1,
+    def __init__(self, num_features=None,
                  initial_learning_rate=1., learning_rate_decay=0.95, max_epoch_decay=0,
                  nodes=[get_current_machine_ip() + ':0'],
                  log_dir=None, erase_log_dir=True,
@@ -169,14 +182,14 @@ class PredictiveModel(object):
                 else:
                     self._global_step = tf.Variable(0, name='global_step', trainable=False)
                     self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
-                    inputs = tf.placeholder(dtype=tf.float32, shape=[batch_size, *num_features], name='inputs')
-                    label = tf.placeholder(dtype=tf.int64, shape=[batch_size], name='label')
-                    self._inference_op = self.build_model(inputs, num_features=num_features,
-                                                           batch_size=batch_size, **kwargs)
+                    inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
+                    label = tf.placeholder(dtype=tf.int64, shape=[None], name='label')
+                    self._do_nothing_op = tf.no_op()
+                    self._inference_op = self.build_model(inputs, num_features=num_features, **kwargs)
+                    self._infer_class_op = tf.argmax(self._inference_op, axis=1)
                     self._loss_op = self.build_loss(label, **kwargs)
                     self._train_op = self.build_training()
                     self._init_summaries(log_dir, erase_log_dir)
-                    self._do_nothing_op = tf.no_op()
 
     def _init_distributed_learning(self, nodes):
         self._task_index = nodes.index(get_current_machine_ip() + ':0')
@@ -232,8 +245,8 @@ class PredictiveModel(object):
         return tf.identity(inputs, name=self.name)
 
     def build_loss(self, label, **kwargs):
-        return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op, labels=label),
-                              name='xentropy_mean')
+        return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op,
+                                                                             labels=label), name='xentropy_mean')
 
 
     def build_training(self, max_gradient_norm=5.):
@@ -269,55 +282,54 @@ class PredictiveModel(object):
 
 
     def train(self, samples, labels, num_epochs, validation_size):
-        if self._task_index > 0:
-            import textwrap
-            for epoch in range(num_epochs):
-                if self._session.should_stop():
-                    current_learning_rate_decay = self._learning_rate_decay ** max(epoch - self._max_epoch_decay, 0.0)
-                    self._session.run(tf.assign(self._learning_rate,
-                                                self._initial_learning_rate * current_learning_rate_decay))
+        import textwrap
+        for epoch in range(num_epochs):
+            if self._session.should_stop():
+                current_learning_rate_decay = self._learning_rate_decay ** max(epoch - self._max_epoch_decay, 0.0)
+                self._session.run(tf.assign(self._learning_rate,
+                                            self._initial_learning_rate * current_learning_rate_decay))
 
-                    # Calculate folds.
-                    train_samples, validation_samples, \
-                    train_labels, validation_labels = train_test_split(samples, labels, test_size=validation_size)
+                # Calculate folds.
+                train_samples, validation_samples, \
+                train_labels, validation_labels = train_test_split(samples, labels, test_size=validation_size)
 
-                    # Update model parameters.
-                    logging.info(textwrap.dedent('''
-                    Training.
-                    Epoch: {} .
-                    Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
-                    self._report_execution(samples=train_samples,
-                                           labels=validate_train_labels(train_labels),
-                                           operation=self._train_op,
-                                           summary_writer=self._train_summary_writer)
+                # Update model parameters.
+                logging.info(textwrap.dedent('''
+                Training.
+                Epoch: {} .
+                Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
+                self._report_execution(samples=train_samples,
+                                       labels=validate_train_labels(train_labels),
+                                       operation=self._train_op,
+                                       summary_writer=self._train_summary_writer)
 
-                    # Validate new model's parameters.
-                    logging.info(textwrap.dedent('''
-                    Validation.
-                    Epoch: {} .''').format(epoch))
-                    self._report_execution(samples=validation_samples,
-                                           labels=validation_labels,
-                                           operation=self._do_nothing_op,
-                                           summary_writer=self._validation_summary_writer)
+                # Validate new model's parameters.
+                logging.info(textwrap.dedent('''
+                Validation.
+                Epoch: {} .''').format(epoch))
+                self._report_execution(samples=validation_samples,
+                                       labels=validation_labels,
+                                       operation=self._do_nothing_op,
+                                       summary_writer=self._validation_summary_writer)
 
-                    self.save()
+                self.save()
 
     def test(self, samples, labels, classes_labels=None):
         # Test model's performance.
         logging.info('Test.')
         classifications = self.report_execution(samples, labels,
-                                                operation=tf.argmax(self._inference_op, axis=1),
+                                                operation=self._infer_class_op,
                                                 summary_writer=self._test_summary_writer)
 
         confusion_matrix_df = plot_confusion_matrix_heatmap(classifications, labels, classes_labels)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
-        if self._task_index > 0:
+        if self._task_index == 0:
             return self._session.run(self._inference_op, feed_dict={'inputs:0': inputs})
 
     def save(self, model_persistence_dir=None, erase_model_persistence_dir=None):
-        if self._task_index > 0:
+        if self._task_index == 0:
             model_persistence_dir = model_persistence_dir or self._model_persistence_dir
             erase_model_persistence_dir = erase_model_persistence_dir or self._erase_model_persistence_dir
             if model_persistence_dir is not None:
@@ -382,24 +394,66 @@ class PredictiveModel(object):
             plt.show()
 
 
-class FastFourierTransform(PredictiveModel):
+class IntermidiateTransformation(PredictiveModel):
+    def train(self, samples, labels, num_epochs, validation_size):
+        pass
+
+    def test(self, samples, labels, classes_labels=None):
+        pass
+
+    def build_loss(self, label, **kwargs):
+        pass
+
+    def build_training(self, max_gradient_norm=5.):
+        return self._do_nothing_op
+
+
+class FastFourierTransform(IntermidiateTransformation):
+
+    def build_model(self, inputs, num_steps, **kwargs):
+        next_2_base_signal_length = next_2_base(num_steps)
+        stfts = tf.contrib.signal.stft(inputs,
+                                       frame_length=next_2_base_signal_length,
+                                       frame_step=next_2_base_signal_length,
+                                       fft_length=next_2_base_signal_length,
+                                       pad_end=True)
+        return super(FastFourierTransform, self).build_model(tf.squeeze(stfts, axis=2))
+
+
+class PowerDensityEstimation(FastFourierTransform):
 
     def build_model(self, inputs, **kwargs):
-        num_steps = inputs.get_shape().dims[1].value
-        next_2_base = 2 ** (int(np.log2(num_steps)) + 1)
-        return super(FastFourierTransform, self)\
-               .build_model(tf.cast(tf.transpose(tf.spectral.rfft(tf.transpose(inputs, [0, 2, 1]),
-                                                                  fft_length=[next_2_base]), [0, 2, 1]),
-                                    tf.float32))
+        stfts = super(PowerDensityEstimation, self).build_model(inputs, **kwargs)
+        return super(FastFourierTransform, self).build_model(tf.real(stfts * tf.conj(stfts)), **kwargs)
 
 
-class BatchReshape(PredictiveModel):
+class LogMagnitudeSpectrogram(FastFourierTransform):
 
-    def build_model(self, inputs, batch_size, new_shape=-1, **kwargs):
-        return super(BatchReshape, self).build_model(tf.reshape(inputs, [batch_size, new_shape]))
+    def build_model(self, inputs, log_offset=1e-6, **kwargs):
+        magnitude_spectrograms = tf.abs(super(LogMagnitudeSpectrogram, self).build_model(inputs, **kwargs))
+        log_magnitude_spectrograms = tf.log(magnitude_spectrograms + log_offset)
+        return super(FastFourierTransform, self).build_model(log_magnitude_spectrograms)
 
 
-class SigmoidActivation(PredictiveModel):
+class InputTranspose(IntermidiateTransformation):
+
+    def build_model(self, inputs, dimension_placement, **kwargs):
+        return super(InputTranspose, self).build_model(tf.transpose(inputs, dimension_placement))
+
+
+class InputReshape(IntermidiateTransformation):
+
+    def build_model(self, inputs, new_shape, **kwargs):
+        return super(InputReshape, self).build_model(tf.reshape(inputs, new_shape))
+
+
+class BatchReshape(IntermidiateTransformation):
+
+    def build_model(self, inputs, new_shape=[-1], **kwargs):
+        return super(BatchReshape, self).build_model(tf.reshape(inputs, [-1, *new_shape]))
+
+
+class SigmoidActivation(IntermidiateTransformation):
 
     def build_model(self, inputs, **kwargs):
         return super(SigmoidActivation, self).build_model(tf.nn.sigmoid(inputs))
@@ -408,13 +462,10 @@ class SigmoidActivation(PredictiveModel):
 class DeepPredictiveModel(PredictiveModel):
     '''A model that concatenates several PredictiveModels.'''
 
-    def __init__(self, num_features=None, batch_size=None, inner_models_arguments=None, **kwargs):
+    def __init__(self, num_features=None, inner_models_arguments=None, **kwargs):
         # Define if user provided arguments for every model or they would have to share the same.
         inner_models_arguments = inner_models_arguments or np.repeat(kwargs, len(inner_models_arguments))
-        for inner_models_argument in inner_models_arguments:
-            inner_models_argument['batch_size'] = batch_size
-        super(DeepPredictiveModel, self).__init__(num_features, batch_size,
-                                                  inner_models_arguments=inner_models_arguments, **kwargs)
+        super(DeepPredictiveModel, self).__init__(num_features, inner_models_arguments=inner_models_arguments, **kwargs)
 
     def build_model(self, inputs, inner_models_classes, inner_models_arguments=None, **kwargs):
         current_input = inputs
@@ -441,6 +492,20 @@ class DeepPredictiveModel(PredictiveModel):
         for inner_model_name in self.inner_models_names:
             parameters.update(get_model_parameters(inner_model_name, self._session))
         return parameters
+
+class TransformationPipeline(DeepPredictiveModel):
+
+    def train(self, samples, labels, num_epochs, validation_size):
+        pass
+
+    def test(self, samples, labels, classes_labels=None):
+        pass
+
+    def build_training(self, max_gradient_norm=5.):
+        pass
+
+    def build_loss(self, label, **kwargs):
+        pass
 
 
 class PredictiveSequenceModel(PredictiveModel):
@@ -515,10 +580,10 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
 
 class PredictiveRecurrentModel(PredictiveSequenceModel):
 
-    def __init__(self, batch_size, num_units, **kwargs):
+    def __init__(self, num_units, **kwargs):
         self._num_units = num_units
-        self.initial_state = self._build_initial_state(batch_size, self._num_units, **kwargs)
-        super(PredictiveSequenceModel, self).__init__(batch_size=batch_size, **kwargs)
+        self.initial_state = self._build_initial_state(self._num_units, **kwargs)
+        super(PredictiveSequenceModel, self).__init__(**kwargs)
 
     def _build_initial_state(self, batch_size, num_units, **kwargs):
         return tf.zeros([batch_size, num_units])
@@ -549,10 +614,10 @@ class Dropout(PredictiveSequenceModel):
         return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
 
     def build_training(self, **kwargs):
-        return tf.no_op()
+        return self._do_nothing_op
 
     def build_loss(self, label, **kwargs):
-        return tf.no_op()
+        return self._do_nothing_op
 
     def build_model_evolution(self, inputs, keep_prob, **kwargs):
         return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
