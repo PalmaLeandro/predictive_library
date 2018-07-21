@@ -214,6 +214,9 @@ class PredictiveModel(object):
         self._cluster_config = tf.ConfigProto(cluster_def=cluster_def)
         self._cluster = tf.train.ClusterSpec(cluster_def)
 
+        if self._task_index > 0:
+            print('Waiting data replicas from ' + nodes[0])
+
 
 
         # # Launch parameter servers.
