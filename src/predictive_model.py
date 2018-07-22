@@ -155,26 +155,64 @@ def log10(x):
 
 next_2_base = lambda x: 2 ** (int(np.log2(x)) + 1)
 
+class DistribuibleProgram(object):
+    '''An object capable of executing a TensorFlow graph distributed over several machines.'''
 
-class PredictiveModel(object):
+    def __init__(self, cluster_machines):
+        self._task_index = cluster_machines.index(get_current_machine_ip() + ':0')
+
+        tmp_cluster = tf.train.ClusterSpec({'tmp': cluster_machines})
+
+        self._ps_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
+        self._worker_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
+
+        from tensorflow.core.protobuf import cluster_pb2 as cluster
+
+        cluster_def = cluster.ClusterDef()
+        ps_job = cluster_def.job.add()
+        ps_job.name = 'ps'
+        worker_job = cluster_def.job.add()
+        worker_job.name = 'worker'
+
+        for node_index, node in enumerate(cluster_machines):
+            ps_job.tasks[node_index] = self._ps_server.target[len('grpc://'):]
+            worker_job.tasks[node_index] = self._worker_server.target[len('grpc://'):]
+
+        self._cluster_config = tf.ConfigProto(cluster_def=cluster_def)
+        self._cluster = tf.train.ClusterSpec(cluster_def)
+
+        if self._task_index > 0:
+            print('Waiting data replicas from ' + cluster_machines[0])
+
+        # # Launch parameter servers.
+        # def ps(cluster, task_index):
+        #     server = tf.train.Server(cluster, job_name='ps', task_index=task_index)
+        #     sess = tf.Session(target=server.target)
+        #     sess.run([tf.local_variables_initializer(), tf.global_variables_initializer()])
+        #     server.join()
+        #
+        # ps_process = Process(target=ps, args=(self._cluster, self._task_index))
+        # ps_process.start()
+
+
+class PredictiveModel(DistribuibleProgram):
 
     def __init__(self, num_features=None,
                  initial_learning_rate=1., learning_rate_decay=0.95, max_epoch_decay=0,
-                 nodes=[get_current_machine_ip() + ':0'],
+                 cluster_machines=[get_current_machine_ip() + ':0'],
                  log_dir=None, erase_log_dir=True,
                  model_persistence_dir=None, erase_model_persistence_dir=True,
                  is_inner_model=False,
                  **kwargs):
         if not is_inner_model:
+            super(PredictiveModel, self).__init__(cluster_machines)
             self._initial_learning_rate = initial_learning_rate
             self._learning_rate_decay = learning_rate_decay
             self._max_epoch_decay = max_epoch_decay
             self._model_persistence_dir = model_persistence_dir
             self._erase_model_persistence_dir = erase_model_persistence_dir
 
-            self._init_distributed_learning(nodes)
-
-            ps_strategy = tf.contrib.training.GreedyLoadBalancingStrategy(len(nodes),
+            ps_strategy = tf.contrib.training.GreedyLoadBalancingStrategy(len(cluster_machines),
                                                                           tf.contrib.training.byte_size_load_fn)
             with tf.device(tf.train.replica_device_setter(self._cluster, ps_strategy=ps_strategy)):
                 if model_persistence_dir is not None:
@@ -190,44 +228,6 @@ class PredictiveModel(object):
                     self._loss_op = self.build_loss(label, **kwargs)
                     self._train_op = self.build_training()
                     self._init_summaries(log_dir, erase_log_dir)
-
-    def _init_distributed_learning(self, nodes):
-        self._task_index = nodes.index(get_current_machine_ip() + ':0')
-
-        tmp_cluster = tf.train.ClusterSpec({'tmp': nodes})
-
-        self._ps_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
-        self._worker_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
-
-        from tensorflow.core.protobuf import cluster_pb2 as cluster
-
-        cluster_def = cluster.ClusterDef()
-        ps_job = cluster_def.job.add()
-        ps_job.name = 'ps'
-        worker_job = cluster_def.job.add()
-        worker_job.name = 'worker'
-
-        for node_index, node in enumerate(nodes):
-            ps_job.tasks[node_index] = self._ps_server.target[len('grpc://'):]
-            worker_job.tasks[node_index] = self._worker_server.target[len('grpc://'):]
-
-        self._cluster_config = tf.ConfigProto(cluster_def=cluster_def)
-        self._cluster = tf.train.ClusterSpec(cluster_def)
-
-        if self._task_index > 0:
-            print('Waiting data replicas from ' + nodes[0])
-
-
-
-        # # Launch parameter servers.
-        # def ps(cluster, task_index):
-        #     server = tf.train.Server(cluster, job_name='ps', task_index=task_index)
-        #     sess = tf.Session(target=server.target)
-        #     sess.run([tf.local_variables_initializer(), tf.global_variables_initializer()])
-        #     server.join()
-        #
-        # ps_process = Process(target=ps, args=(self._cluster, self._task_index))
-        # ps_process.start()
 
     def _init_summaries(self, log_dir=None, erase_log_dir=True):
         if log_dir is not None:
