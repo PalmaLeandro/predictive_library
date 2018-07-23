@@ -183,7 +183,7 @@ class DistribuibleProgram(object):
 
         if self._task_index > 0:
             print('Waiting data replicas from ' + cluster_machines[0])
-
+x
         # # Launch parameter servers.
         # def ps(cluster, task_index):
         #     server = tf.train.Server(cluster, job_name='ps', task_index=task_index)
