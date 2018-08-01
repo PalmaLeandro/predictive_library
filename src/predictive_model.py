@@ -145,7 +145,11 @@ def validate_train_labels(labels):
 
 def get_current_machine_ip():
     import socket
-    return socket.gethostbyname(socket.gethostname())
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('8.8.8.8', 80))
+    current_machine_ip = s.getsockname()[0]
+    s.close()
+    return current_machine_ip
 
 
 def log10(x):
