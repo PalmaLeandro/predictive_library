@@ -183,7 +183,7 @@ class DistribuibleProgram(object):
 
         if self._task_index > 0:
             print('Waiting data replicas from ' + cluster_machines[0])
-x
+
         # # Launch parameter servers.
         # def ps(cluster, task_index):
         #     server = tf.train.Server(cluster, job_name='ps', task_index=task_index)
@@ -413,13 +413,9 @@ class IntermidiateTransformation(PredictiveModel):
 
 class FastFourierTransform(IntermidiateTransformation):
 
-    def build_model(self, inputs, num_steps, **kwargs):
-        next_2_base_signal_length = next_2_base(num_steps)
-        stfts = tf.contrib.signal.stft(inputs,
-                                       frame_length=next_2_base_signal_length,
-                                       frame_step=next_2_base_signal_length,
-                                       fft_length=next_2_base_signal_length,
-                                       pad_end=True)
+    def build_model(self, inputs, frame_length, frame_step=None, **kwargs):
+        frame_step = frame_step if frame_step is not None else frame_length
+        stfts = tf.contrib.signal.stft(inputs, frame_length=frame_length, frame_step=frame_step, pad_end=True)
         return super(FastFourierTransform, self).build_model(tf.squeeze(stfts, axis=2))
 
 
