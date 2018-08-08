@@ -13,14 +13,14 @@ def init_dir(dir_path, erase_dir=True):
     tf.gfile.MakeDirs(dir_path)
 
 
-def plot_dataset(samples, labels=None, ax=None):
+def plot_dataset(inputs, labels=None, ax=None):
     import matplotlib.pyplot as plt
     import matplotlib.colors as colors
     ax_arg = ax
     ax = ax_arg or plt.subplots(figsize=(10, 10))[1]
     import pandas as pd
-    for label_value, label_value_data in pd.DataFrame({'x': samples[0],
-                                                       'y': samples[1],
+    for label_value, label_value_data in pd.DataFrame({'x': inputs[0],
+                                                       'y': inputs[1],
                                                        'label': labels}).groupby('label'):
         label_color = colors.rgb_to_hsv(np.random.rand(3))
         ax.scatter(label_value_data['x'], label_value_data['y'], label=label_value, c=label_color)
@@ -224,6 +224,7 @@ class PredictiveModel(DistribuibleProgram):
                 else:
                     self._global_step = tf.Variable(0, name='global_step', trainable=False)
                     self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
+                    self._update_learning_rate_op = self.build_learning_rate_update(**kwargs)
                     inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
                     label = tf.placeholder(dtype=tf.int64, shape=[None], name='label')
                     self._do_nothing_op = tf.no_op()
@@ -255,7 +256,6 @@ class PredictiveModel(DistribuibleProgram):
         return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op,
                                                                              labels=label), name='xentropy_mean')
 
-
     def build_training(self, max_gradient_norm=5.):
         '''Defines Gradient Descent with clipped norms as default training method.'''
         tvars = tf.trainable_variables()
@@ -263,13 +263,18 @@ class PredictiveModel(DistribuibleProgram):
         optimizer = tf.train.GradientDescentOptimizer(self._learning_rate)
         return optimizer.apply_gradients(zip(grads, tvars))
 
-    # TODO: implement minibatch training with data folding.
-    def report_execution(self, samples, labels, operation, summary_writer=None):
+    def build_learning_rate_update(self, **kwargs):
+        epoch = tf.placeholder(dtype=tf.int32, name='epoch')
+        current_learning_rate_decay = self._learning_rate_decay ** \
+                                      tf.maximum(tf.cast(epoch, tf.float32) - self._max_epoch_decay, 0.)
+        return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
+
+    def report_execution(self, inputs, labels, operation, summary_writer=None):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         losses = []
         results = []
-        for sample_index, (sample, label) in enumerate(zip(samples, labels)):
-            feed = {'inputs:0': np.array([sample]), 'label:0': np.array([label])}
+        for input_index, (input, label) in enumerate(zip(inputs, labels)):
+            feed = {'inputs:0': np.array([input]), 'label:0': np.array([label])}
 
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
                                                               feed_dict=feed)
@@ -280,7 +285,7 @@ class PredictiveModel(DistribuibleProgram):
                 summary_writer.add_summary(summaries, global_step=self._session.run(self._global_step))
                 summary_writer.flush()
 
-            epoch_completion_perc = float(sample_index / len(samples)) * 100.
+            epoch_completion_perc = float(input_index / len(inputs)) * 100.
             if epoch_completion_perc % 10 == 0:
                 logging.info('Epoch completion: {}%'.format(int(epoch_completion_perc)))
 
@@ -288,43 +293,45 @@ class PredictiveModel(DistribuibleProgram):
         return results
 
 
-    def train(self, samples, labels, num_epochs, validation_size):
+    def train(self, dataset, num_epochs, validation_size=0.2, batch_size=20):
         import textwrap
         for epoch in range(num_epochs):
-            if self._session.should_stop():
-                current_learning_rate_decay = self._learning_rate_decay ** max(epoch - self._max_epoch_decay, 0.0)
-                self._session.run(tf.assign(self._learning_rate,
-                                            self._initial_learning_rate * current_learning_rate_decay))
+            if not self._session.should_stop():
+                self._session.run(self._update_learning_rate_op, feed_dict={'epoch:0':epoch})
 
-                # Calculate folds.
-                train_samples, validation_samples, \
-                train_labels, validation_labels = train_test_split(samples, labels, test_size=validation_size)
+                # Calculate dataset's folds.
+                train_inputs, validation_samples, \
+                train_labels, validation_labels = dataset.provide_train_validation_partition(validation_size)
 
-                # Update model parameters.
+                # Update model's parameters.
                 logging.info(textwrap.dedent('''
                 Training.
                 Epoch: {} .
                 Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
-                self._report_execution(samples=train_samples,
-                                       labels=validate_train_labels(train_labels),
-                                       operation=self._train_op,
-                                       summary_writer=self._train_summary_writer)
+                for batch_index in range(dataset.num_train_batches(batch_size)):
+                    train_batch_inputs,\
+                    train_batch_labels = build_batch_inputs_labels(train_inputs, validate_train_labels(train_labels),
+                                                                   batch_size, batch_index)
+                    self.report_execution(inputs=train_batch_inputs,
+                                          labels=train_batch_labels,
+                                          operation=self._train_op,
+                                          summary_writer=self._train_summary_writer)
 
                 # Validate new model's parameters.
                 logging.info(textwrap.dedent('''
                 Validation.
                 Epoch: {} .''').format(epoch))
-                self._report_execution(samples=validation_samples,
-                                       labels=validation_labels,
-                                       operation=self._do_nothing_op,
-                                       summary_writer=self._validation_summary_writer)
+                self.report_execution(inputs=validation_samples,
+                                      labels=validation_labels,
+                                      operation=self._do_nothing_op,
+                                      summary_writer=self._validation_summary_writer)
 
                 self.save()
 
-    def test(self, samples, labels, classes_labels=None):
+    def test(self, inputs, labels, classes_labels=None):
         # Test model's performance.
         logging.info('Test.')
-        classifications = self.report_execution(samples, labels,
+        classifications = self.report_execution(inputs, labels,
                                                 operation=self._infer_class_op,
                                                 summary_writer=self._test_summary_writer)
 
@@ -366,11 +373,11 @@ class PredictiveModel(DistribuibleProgram):
     def parameters(self):
         return get_model_parameters(self.name, self._session)
 
-    def plot_parameters(self, samples=None, labels=None, ax_arg=None, limits=[-5.,5.]):
+    def plot_parameters(self, inputs=None, labels=None, ax_arg=None, limits=[-5., 5.]):
         import matplotlib.pyplot as plt
         ax = ax_arg or plt.subplots(figsize=(10, 10))[1]
-        if samples is not None:
-            plot_dataset(samples=samples, labels=labels, ax=ax)
+        if inputs is not None:
+            plot_dataset(inputs=inputs, labels=labels, ax=ax)
         parameters = self.parameters
 
         hyperplanes_names = np.unique([name.split('/')[0] for name in parameters.keys()]).tolist()
@@ -405,7 +412,7 @@ class IntermidiateTransformation(PredictiveModel):
     def train(self, samples, labels, num_epochs, validation_size):
         pass
 
-    def test(self, samples, labels, classes_labels=None):
+    def test(self, inputs, labels, classes_labels=None):
         pass
 
     def build_loss(self, label, **kwargs):
@@ -501,7 +508,7 @@ class TransformationPipeline(DeepPredictiveModel):
     def train(self, samples, labels, num_epochs, validation_size):
         pass
 
-    def test(self, samples, labels, classes_labels=None):
+    def test(self, inputs, labels, classes_labels=None):
         pass
 
     def build_training(self, max_gradient_norm=5.):
@@ -657,3 +664,461 @@ class IterativeNN(PredictiveModel):
             return inputs + (1 - activation) * weights_T + activation * (-2) * projection * (weights_T / weights_norm)
 
         return tf.while_loop(iteration_condition, iteration_execution, [input], maximum_iterations=max_it)
+
+
+class DataSet(object):
+
+    def get_all_samples(self):
+        pass
+
+    def get_sample(self):
+        pass
+
+    def get_sample_batch(self, batch_size):
+        pass
+
+    def provide_train_validation_partition(self):
+        pass
+
+
+def dataset_class_distribution(labels, labels_names=None, show_table=True, plot_chart=True, ax=None, **kwargs):
+    classes_histogram = np.unique(labels.tolist(), return_counts=True)
+    if not show_table and not plot_chart:
+        return classes_histogram
+    import pandas as pd
+    labels_names = labels_names or [str(class_index) for class_index in range(labels.max())]
+    classes_histogram_df = pd.DataFrame({'class': [labels_names[class_index]
+                                                   for class_index, class_num_samples
+                                                   in zip(*classes_histogram)],
+                                         'num_samples': [class_num_samples
+                                                         for class_index, class_num_samples
+                                                         in zip(*classes_histogram)]})
+    if plot_chart:
+        if ax is None:
+            import matplotlib.pyplot as plt
+            ax = plt.subplot(**kwargs)
+
+        ax.bar(classes_histogram_df['class'], classes_histogram_df['num_samples'])
+
+    if show_table:
+        classes_histogram_df.set_index('class', inplace=True)
+
+    return classes_histogram_df, ax
+
+
+def sample_inputs_labels(inputs, labels=None):
+    import random
+    sample_index = random.randrange(len(inputs))
+    if labels is not None:
+        assert len(labels) == len(inputs), 'Inputs an labels lengths don\'t match.'
+        return inputs[sample_index], labels[sample_index]
+    else:
+        return inputs[sample_index]
+
+
+def build_batch_inputs_labels(inputs, labels=None, batch_size=1, batch_position=0):
+    assert batch_position + batch_size < len(inputs), 'The batch requested is out of range.'
+    return inputs[batch_position:batch_position + batch_size], labels[batch_position:batch_position + batch_size]\
+           if labels is not None else inputs[batch_position:batch_position + batch_size]
+
+
+class ArrayDataSet(DataSet):
+
+    def __init__(self, inputs, labels=np.array([]),
+                 test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
+        self.labels_names = labels_names
+        if test_proportion is None:
+            self.train_inputs, self.train_labels = inputs, labels
+            self.test_inputs, self.test_labels = inputs, labels
+        else:
+            self.train_inputs, self.test_inputs, self.train_labels, self.test_labels = train_test_split(inputs,
+                                                                                                        labels,
+                                                                                        test_size=test_proportion)
+            self.validation_proportion = validation_proportion
+
+    @property
+    def num_samples(self):
+        return len(self.get_all_samples()[0])
+
+    def __len__(self):
+        return self.num_samples
+
+    @property
+    def num_train_samples(self):
+        return len(self.train_inputs)
+
+    @property
+    def num_test_samples(self):
+        return len(self.train_inputs)
+
+    @property
+    def num_classes(self):
+        # Consider labels as indices being counted from zero.
+        return self.train_labels.max() + 1
+
+    @property
+    def num_features(self):
+        sample_inputs = self.get_sample()[0]
+        # If the sample is a sequence then return the length of the first step.
+        return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
+
+    def provide_train_validation_partition(self, validation_proportion=None):
+        return train_test_split(self.train_inputs, self.train_labels,
+                                test_size=validation_proportion or self.validation_proportion)
+
+    def get_all_samples(self):
+        return np.concatenate([self.train_inputs, self.test_inputs]), \
+               np.concatenate([self.train_labels, self.test_labels])
+
+    def get_sample(self):
+        return sample_inputs_labels(*self.get_all_samples())
+
+    def get_train_sample(self):
+        return sample_inputs_labels(self.train_inputs, self.train_labels)
+
+    def get_test_sample(self):
+        return sample_inputs_labels(self.test_inputs, self.test_labels)
+
+    def num_batches(self, batch_size):
+        return self.num_samples // batch_size
+
+    def num_train_batches(self, batch_size):
+        return self.num_train_samples // batch_size
+
+    def get_train_sample_batch(self, batch_size):
+        return build_batch_inputs_labels(self.train_inputs, self.train_labels, batch_size)
+
+    def classes_distribution(self, show_chart=True):
+        classes_histogram_df, ax = dataset_class_distribution(self.get_all_samples()[1], self.labels_names,
+                                                              title='Dataset classes distribution')
+        if show_chart:
+            import matplotlib.pyplot as plt
+            plt.show()
+            return classes_histogram_df, ax
+        else:
+            return classes_histogram_df
+
+    def train_test_classes_distribution(self):
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        _, (train_dataset_classes_ax, test_dataset_classes_ax) = plt.subplots(1, 2, figsize=(16, 10), sharey=True)
+
+        train_samples_histogram_df, _ = dataset_class_distribution(self.train_labels, self.labels_names,
+                                                                   show_table=False,
+                                                                   ax=train_dataset_classes_ax)
+        plt.sca(train_dataset_classes_ax)
+        plt.xticks(rotation=-90)
+        train_dataset_classes_ax.set_title('Train dataset classes distribution')
+
+        test_samples_histogram_df, _ = dataset_class_distribution(self.test_labels, self.labels_names,
+                                                                  show_table=False,
+                                                                  ax=test_dataset_classes_ax)
+
+        plt.sca(test_dataset_classes_ax)
+        plt.xticks(rotation=-90)
+        test_dataset_classes_ax.set_title('Test dataset classes distribution')
+
+        train_samples_histogram_df['dataset'] = 'Train'
+        test_samples_histogram_df['dataset'] = 'Test'
+        return pd.concat([train_samples_histogram_df, test_samples_histogram_df]).pivot(index='class',
+                                                                                        columns='dataset')
+
+
+class CSVDataSet(ArrayDataSet):
+
+    def __init__(self, path, sample_field=None, step_field=None, label_field=None,
+                 test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
+        import pandas as pd
+        dataset_df = pd.read_csv(path, **kwargs)
+
+        if sample_field is not None and sample_field in dataset_df.columns and \
+           label_field is not None and label_field in dataset_df.columns:
+            num_samples = dataset_df[sample_field].nunique()
+
+            labels = dataset_df[[sample_field,
+                                 label_field]].drop_duplicates().set_index(sample_field)[label_field].as_matrix()
+
+            if step_field is not None and step_field in dataset_df.columns:
+                # Treatment for sequential datasets.
+                self.steps_per_sample = dataset_df[step_field].nunique()
+                num_features = len([column for column in dataset_df.columns if column not in [sample_field,
+                                                                                              step_field,
+                                                                                              label_field]])
+
+                inputs = dataset_df.drop(label_field, axis=1).set_index([sample_field, step_field]).as_matrix()\
+                            .reshape([num_samples, self.steps_per_sample, num_features])
+            else:
+                self.steps_per_sample = None
+                inputs = dataset_df.drop(label_field, axis=1).set_index(sample_field).as_matrix()
+
+        else:
+            self.steps_per_sample = None
+            if label_field is not None and label_field in dataset_df.columns:
+                inputs = dataset_df.drop(label_field, axis=1).as_matrix()
+                labels = dataset_df[label_field].as_matrix()
+            else:
+                inputs = dataset_df.as_matrix()
+                labels = np.array([])
+
+        super(CSVDataSet, self).__init__(inputs, labels,
+                                         test_proportion=test_proportion, validation_proportion=validation_proportion,
+                                         labels_names=labels_names, **kwargs)
+
+def list_folder_files_with_extension(folder_path, extension):
+    import glob
+    folder_path = folder_path + '*' if folder_path[-1] == '/' else '/*'
+    return [filename for filename in glob.glob(folder_path) if filename.split('.')[-1] == extension]
+
+
+class SequentialData(ArrayDataSet):
+
+    @property
+    def num_samples(self):
+        pass
+
+    @property
+    def num_features(self):
+        pass
+
+    @property
+    def steps_per_sample(self):
+        pass
+
+    @property
+    def shape(self):
+        return [self.num_samples, self.steps_per_sample, self.num_features]
+
+    def __getitem__(self, key):
+        pass
+
+
+class PartialSequentialData(SequentialData):
+    """Class that wraps a SequentialData in order to retrieve only part of it, reusing its main functionality.
+       This is particularly useful to retrieve inputs or labels separately to build an ArrayDataSet."""
+
+    def __init__(self, complete_sequential_data):
+        self.complete_sequential_data = complete_sequential_data
+
+    @property
+    def num_samples(self):
+        return self.complete_sequential_data.num_samples
+
+    @property
+    def num_features(self):
+        return self.complete_sequential_data.num_features
+
+    @property
+    def steps_per_sample(self):
+        return self.complete_sequential_data.steps_per_sample
+
+    @property
+    def num_classes(self):
+        return self.complete_sequential_data.num_classes
+
+    def __getitem__(self, key):
+        """Implement acquisition of the part of the complete data that will be retrieved."""
+        pass
+
+
+class KeyPartialSequentialData(PartialSequentialData):
+
+    def __init__(self, data_key, **kwargs):
+        self.data_key = data_key
+        super(KeyPartialSequentialData, self).__init__(**kwargs)
+
+    def __getitem__(self, key):
+        return self.complete_sequential_data[key][self.data_key]
+
+    def get_all_samples(self):
+        return self.complete_sequential_data[:, self.data_key]
+
+    def tolist(self):
+        return self.complete_sequential_data[:, self.data_key]
+
+
+def data_partition(data_sequence_sets, key):
+    return np.concatenate([data_sequence_set[:, key] for data_sequence_set in data_sequence_sets])
+
+
+class SequentialDataMerge(SequentialData):
+
+    def __init__(self, data_sequences_sets, test_proportion=None, validation_proportion=None, labels_names=None,
+                 exact_merge=False, inputs_key=0, labels_key=1, **kwargs):
+        self.data_sequences_sets = []
+        num_features = None
+        for data_sequence_set in data_sequences_sets:
+            if num_features is not None:
+                assert data_sequence_set.num_features == num_features,\
+                    'Data sequences sets don\'t have the same number of features'
+            num_features = data_sequence_set.num_features
+            self.data_sequences_sets.append(data_sequence_set)
+
+        self.exact_merge = exact_merge
+
+        if exact_merge:
+            super(SequentialData, self).__init__(inputs=KeyPartialSequentialData(inputs_key,
+                                                                                 complete_sequential_data=self),
+                                                 labels=KeyPartialSequentialData(labels_key,
+                                                                                 complete_sequential_data=self),
+                                                 test_proportion=test_proportion,
+                                                 validation_proportion=validation_proportion,
+                                                 labels_names=labels_names, **kwargs)
+        else:
+            if test_proportion not in (0, 1):
+                self.num_train_sequence_sets = int(round(len(data_sequences_sets) * (1 - test_proportion)))
+                self.num_test_sequence_sets = int(round(len(data_sequences_sets) * (test_proportion)))
+                assert self.num_train_sequence_sets + self.num_test_sequence_sets == len(self.data_sequences_sets)
+                self.test_sequence_sets = self.data_sequences_sets[self.num_train_sequence_sets:]
+                self.inputs_key = inputs_key
+                self.labels_key = labels_key
+                self.labels_names = labels_names
+
+    @property
+    def train_inputs(self):
+        return data_partition(self.data_sequences_sets[:self.num_train_sequence_sets], self.inputs_key)
+
+    @property
+    def train_labels(self):
+        return data_partition(self.data_sequences_sets[:self.num_train_sequence_sets], self.labels_key)
+    @property
+    def test_inputs(self):
+        return data_partition(self.data_sequences_sets[self.num_train_sequence_sets:], self.inputs_key)
+
+    @property
+    def test_labels(self):
+        return data_partition(self.data_sequences_sets[self.num_train_sequence_sets:], self.labels_key)
+
+    def provide_train_validation_partition(self, validation_proportion=None):
+        validation_proportion = validation_proportion or self.validation_proportion
+        if self.exact_merge:
+            return super(SequentialDataMerge, self).provide_train_validation_partition(validation_proportion)
+        else:
+            train_sequence_sets = self.data_sequences_sets[:self.num_train_sequence_sets]
+            num_fold_train_sequence_sets = int(round(len(train_sequence_sets) * (1 - validation_proportion)))
+
+            fold_train_inputs = data_partition(train_sequence_sets[:num_fold_train_sequence_sets], self.inputs_key)
+            fold_train_labels = data_partition(train_sequence_sets[:num_fold_train_sequence_sets], self.labels_key)
+
+            fold_validation_inputs = data_partition(train_sequence_sets[num_fold_train_sequence_sets:], self.inputs_key)
+            fold_validation_labels = data_partition(train_sequence_sets[num_fold_train_sequence_sets:], self.labels_key)
+
+            return fold_train_inputs, fold_validation_inputs, fold_train_labels, fold_validation_labels
+
+
+    @property
+    def num_samples(self):
+        return sum([data_sequences_set.num_samples for data_sequences_set in self.data_sequences_sets])
+
+    @property
+    def num_features(self):
+        return self.data_sequences_sets[0].num_features
+
+    @property
+    def steps_per_sample(self):
+        return self.data_sequences_sets[0].steps_per_sample
+
+    @property
+    def num_classes(self):
+        return max(*[data_sequences_set.num_classes for data_sequences_set in self.data_sequences_sets])
+
+    def sample_at(self, index):
+        if index < self.num_samples:
+            data_sequences_set_index, sample_index = [(data_sequences_set_index, cummulative_num_sample - index)
+                                                      for data_sequences_set_index, cummulative_num_sample
+                                                      in enumerate(np.cumsum([data_sequences_set.num_samples
+                                                                              for data_sequences_set
+                                                                              in self.data_sequences_sets]))
+                                                      if index < cummulative_num_sample][0]
+            return self.data_sequences_sets[data_sequences_set_index][sample_index]
+        else:
+            raise IndexError('Requested sample at {} is out of bounds.'.format(index))
+
+    def __getitem__(self, key):
+        if np.isscalar(key):
+            return self.sample_at(key)
+        else:
+            return np.concatenate([data_sequence_set.get_all_samples()
+                                   for data_sequence_set
+                                   in self.data_sequences_sets])[key]
+
+
+class EpochEegExperimentData(SequentialData):
+
+    eeg_signal_sample_position = 0
+    label_sample_position = 1
+
+    def __init__(self, files_folder_path, epoch_duration):
+        self.files_folder_path = files_folder_path
+        self.epoch_duration = epoch_duration
+
+        # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
+        signal_classification = self.signal_classification
+        steps_per_sample = self.steps_per_sample
+        self.valid_samples = [(onset, label) for onset_index, (onset, label) in enumerate(signal_classification)
+                              if onset_index + 1 < len(signal_classification)
+                              and (signal_classification[onset_index + 1][0] - onset) == steps_per_sample]
+
+    @property
+    def eeg_signals(self):
+        import mne
+        set_filename = list_folder_files_with_extension(self.files_folder_path, 'set')[0]
+        return mne.io.read_raw_eeglab(input_fname=set_filename, preload=False)
+
+    @property
+    def signal_classification(self):
+        pass
+
+    @property
+    def num_samples(self):
+        return len(self.valid_samples)
+
+    @property
+    def steps_per_sample(self):
+        return int(self.eeg_signals.info.get('sfreq')) * self.epoch_duration
+
+    @property
+    def num_features(self):
+        import mne
+        return len(mne.pick_types(self.eeg_signals.info, eeg=True, stim=False))
+
+    @property
+    def num_classes(self):
+        return np.array(self.valid_samples)[:, self.label_sample_position].max()
+
+    def __getitem__(self, key):
+        if np.isscalar(key):
+            onset, label = self.valid_samples[key]
+            # Omit empty stim channel and time dimmension.
+            return self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0], label
+        elif isinstance(key, tuple):
+            if isinstance(key[0], slice):
+                if key[1] == self.label_sample_position:
+                    return np.array(self.valid_samples)[key]
+                if key[1] == self.eeg_signal_sample_position:
+                    return KeyPartialSequentialData(data_key=self.eeg_signal_sample_position,
+                                                    complete_sequential_data=self)
+
+
+class FmedLfaEegExperimentData(EpochEegExperimentData):
+
+    @property
+    def signal_classification(self):
+        import scipy.io
+        mat_filename = list_folder_files_with_extension(self.files_folder_path, 'mat')[0]
+        labels_data = scipy.io.loadmat(mat_filename)['stageData'][0][0]
+
+        # Select the index of the stages in de matrix, most of the time is 5 but sometimes it's 6.
+        stage_info_index = 5 if labels_data[5].dtype == np.dtype('uint8') else 6
+        onset_index = stage_info_index + 1
+
+        return list(zip(labels_data[onset_index][:,0], labels_data[stage_info_index][:,0]))
+
+
+class FmedLfaExperimentDataSet(SequentialDataMerge):
+
+    def __init__(self, experiments_data_folders, epoch_duration, test_proportion, validation_proportion, labels_names):
+        super(FmedLfaExperimentDataSet, self).__init__([FmedLfaEegExperimentData(experiments_data_folder,
+                                                                                 epoch_duration)
+                                                        for experiments_data_folder in experiments_data_folders],
+                                                       test_proportion, validation_proportion, labels_names)
