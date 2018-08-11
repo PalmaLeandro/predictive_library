@@ -264,13 +264,14 @@ class PredictiveModel(DistribuibleProgram):
                                       tf.maximum(tf.cast(epoch, tf.float32) - self._max_epoch_decay, 0.)
         return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
 
-    def report_execution(self, inputs, labels, operation, summary_writer=None):
+    def report_execution(self, inputs, labels, operation, summary_writer=None, batched_samples=False):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         losses = []
         results = []
         for input_index, (input, label) in enumerate(zip(inputs, labels)):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              {'inputs:0': input, 'label:0': label})
+                                                              {'inputs:0': input if batched_samples else [input],
+                                                               'label:0': label if batched_samples else [label]})
             results.append(result)
             losses.append(loss_value)
 
@@ -308,7 +309,8 @@ class PredictiveModel(DistribuibleProgram):
                     self.report_execution(inputs=[[train_inputs[sample_index] for sample_index in batch_samples]],
                                           labels=[[train_labels[sample_index] for sample_index in batch_samples]],
                                           operation=self._train_op,
-                                          summary_writer=self._train_summary_writer)
+                                          summary_writer=self._train_summary_writer,
+                                          batched_samples=True)
 
                 # Validate new model's parameters.
                 logging.info(textwrap.dedent('''
