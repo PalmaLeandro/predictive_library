@@ -321,14 +321,14 @@ class PredictiveModel(DistribuibleProgram):
 
                 self.save()
 
-    def test(self, inputs, labels, classes_labels=None):
+    def test(self, dataset, classes_labels=None):
         # Test model's performance.
         logging.info('Test.')
-        classifications = self.report_execution(inputs, labels,
+        classifications = self.report_execution(dataset.test_inputs, dataset.test_labels,
                                                 operation=self._infer_class_op,
                                                 summary_writer=self._test_summary_writer)
 
-        confusion_matrix_df = plot_confusion_matrix_heatmap(classifications, labels, classes_labels)
+        confusion_matrix_df = plot_confusion_matrix_heatmap(classifications, dataset.test_labels, classes_labels)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
