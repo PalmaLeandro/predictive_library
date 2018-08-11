@@ -135,14 +135,6 @@ def linear_neurons_layer(inputs, num_units, scope_name):
     return logits
 
 
-def validate_train_labels(labels):
-    if np.max(labels) != len(np.unique(labels)) - 1:
-        for label in range(max(np.max(labels), len(np.unique(labels)))):
-            if label not in np.unique(labels):
-                labels = np.append(labels, np.array([label]))
-    return labels
-
-
 def get_current_machine_ip():
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -233,6 +225,9 @@ class PredictiveModel(DistribuibleProgram):
                     self._loss_op = self.build_loss(label, **kwargs)
                     self._train_op = self.build_training()
                     self._init_summaries(log_dir, erase_log_dir)
+                    # This is required so that tensorflow realizes the true amount of possible classes.
+                    self._session.run(self._train_op, {'inputs:0': [np.tile(0, num_features)],
+                                                       'label:0': [self._inference_op.shape[-1].value - 1]})
 
     def _init_summaries(self, log_dir=None, erase_log_dir=True):
         if log_dir is not None:
@@ -274,10 +269,8 @@ class PredictiveModel(DistribuibleProgram):
         losses = []
         results = []
         for input_index, (input, label) in enumerate(zip(inputs, labels)):
-            feed = {'inputs:0': np.array([input]), 'label:0': np.array([label])}
-
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              feed_dict=feed)
+                                                              {'inputs:0': input, 'label:0': label})
             results.append(result)
             losses.append(loss_value)
 
@@ -300,20 +293,20 @@ class PredictiveModel(DistribuibleProgram):
                 self._session.run(self._update_learning_rate_op, feed_dict={'epoch:0':epoch})
 
                 # Calculate dataset's folds.
-                train_inputs, validation_samples, \
-                train_labels, validation_labels = dataset.provide_train_validation_partition(validation_size)
+                train_inputs, validation_inputs, \
+                train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
 
                 # Update model's parameters.
                 logging.info(textwrap.dedent('''
                 Training.
                 Epoch: {} .
                 Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
-                for batch_index in range(dataset.num_train_batches(batch_size)):
-                    train_batch_inputs,\
-                    train_batch_labels = build_batch_inputs_labels(train_inputs, validate_train_labels(train_labels),
-                                                                   batch_size, batch_index)
-                    self.report_execution(inputs=train_batch_inputs,
-                                          labels=train_batch_labels,
+
+                batches_samples_indices = build_random_samples_indices_batches(num_samples=len(train_inputs),
+                                                                               batch_size=batch_size)
+                for batch_samples in batches_samples_indices:
+                    self.report_execution(inputs=[[train_inputs[sample_index] for sample_index in batch_samples]],
+                                          labels=[[train_labels[sample_index] for sample_index in batch_samples]],
                                           operation=self._train_op,
                                           summary_writer=self._train_summary_writer)
 
@@ -321,7 +314,7 @@ class PredictiveModel(DistribuibleProgram):
                 logging.info(textwrap.dedent('''
                 Validation.
                 Epoch: {} .''').format(epoch))
-                self.report_execution(inputs=validation_samples,
+                self.report_execution(inputs=validation_inputs,
                                       labels=validation_labels,
                                       operation=self._do_nothing_op,
                                       summary_writer=self._validation_summary_writer)
@@ -677,7 +670,7 @@ class DataSet(object):
     def get_sample_batch(self, batch_size):
         pass
 
-    def provide_train_validation_partition(self):
+    def provide_train_validation_random_partition(self):
         pass
 
 
@@ -716,10 +709,14 @@ def sample_inputs_labels(inputs, labels=None):
         return inputs[sample_index]
 
 
-def build_batch_inputs_labels(inputs, labels=None, batch_size=1, batch_position=0):
-    assert batch_position + batch_size < len(inputs), 'The batch requested is out of range.'
-    return inputs[batch_position:batch_position + batch_size], labels[batch_position:batch_position + batch_size]\
-           if labels is not None else inputs[batch_position:batch_position + batch_size]
+def build_random_samples_indices_batches(num_samples, batch_size=1):
+    assert batch_size < num_samples, 'The batch requested is too large.'
+    import random
+    num_batches = num_samples // batch_size
+    samples_indices_shuffle = random.sample(range(num_samples), k=num_samples)
+    batches_samples = [samples_indices_shuffle[batch_index * batch_size: batch_index * batch_size + batch_size]
+                       for batch_index in range(num_batches)]
+    return batches_samples
 
 
 class ArrayDataSet(DataSet):
@@ -762,7 +759,7 @@ class ArrayDataSet(DataSet):
         # If the sample is a sequence then return the length of the first step.
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
-    def provide_train_validation_partition(self, validation_proportion=None):
+    def provide_train_validation_random_partition(self, validation_proportion=None):
         return train_test_split(self.train_inputs, self.train_labels,
                                 test_size=validation_proportion or self.validation_proportion)
 
@@ -786,7 +783,7 @@ class ArrayDataSet(DataSet):
         return self.num_train_samples // batch_size
 
     def get_train_sample_batch(self, batch_size):
-        return build_batch_inputs_labels(self.train_inputs, self.train_labels, batch_size)
+        return build_random_samples_indices_batches(self.train_inputs, self.train_labels, batch_size)
 
     def classes_distribution(self, show_chart=True):
         classes_histogram_df, ax = dataset_class_distribution(self.get_all_samples()[1], self.labels_names,
@@ -941,19 +938,20 @@ def data_partition(data_sequence_sets, key):
     return np.concatenate([data_sequence_set[:, key] for data_sequence_set in data_sequence_sets])
 
 
+def validate_train_labels(labels):
+    labels = labels.tolist()
+    if np.max(labels) != len(np.unique(labels)) - 1:
+        for label in range(max(np.max(labels), len(np.unique(labels)))):
+            if label not in np.unique(labels):
+                labels = np.append(labels, np.array([label]))
+    return labels
+
+
 class SequentialDataMerge(SequentialData):
 
     def __init__(self, data_sequences_sets, test_proportion=None, validation_proportion=None, labels_names=None,
                  exact_merge=False, inputs_key=0, labels_key=1, **kwargs):
-        self.data_sequences_sets = []
-        num_features = None
-        for data_sequence_set in data_sequences_sets:
-            if num_features is not None:
-                assert data_sequence_set.num_features == num_features,\
-                    'Data sequences sets don\'t have the same number of features'
-            num_features = data_sequence_set.num_features
-            self.data_sequences_sets.append(data_sequence_set)
-
+        self.data_sequences_sets = data_sequences_sets
         self.exact_merge = exact_merge
 
         if exact_merge:
@@ -989,26 +987,66 @@ class SequentialDataMerge(SequentialData):
     def test_labels(self):
         return data_partition(self.data_sequences_sets[self.num_train_sequence_sets:], self.labels_key)
 
-    def provide_train_validation_partition(self, validation_proportion=None):
+    def provide_train_validation_random_partition(self, validation_proportion=None):
         validation_proportion = validation_proportion or self.validation_proportion
         if self.exact_merge:
-            return super(SequentialDataMerge, self).provide_train_validation_partition(validation_proportion)
+            return super(SequentialDataMerge, self).provide_train_validation_random_partition(validation_proportion)
         else:
+            # Here we go.
+            import random
             train_sequence_sets = self.data_sequences_sets[:self.num_train_sequence_sets]
-            num_fold_train_sequence_sets = int(round(len(train_sequence_sets) * (1 - validation_proportion)))
+            number_of_sequence_sets_on_train_fold = int(round(len(train_sequence_sets) * (1 - validation_proportion)))
 
-            fold_train_inputs = data_partition(train_sequence_sets[:num_fold_train_sequence_sets], self.inputs_key)
-            fold_train_labels = data_partition(train_sequence_sets[:num_fold_train_sequence_sets], self.labels_key)
+            train_sequence_sets_indices_fold = random.sample(range(len(train_sequence_sets)),
+                                                             k=number_of_sequence_sets_on_train_fold)
+            train_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
+                                        for data_sequence_set_index in train_sequence_sets_indices_fold]
 
-            fold_validation_inputs = data_partition(train_sequence_sets[num_fold_train_sequence_sets:], self.inputs_key)
-            fold_validation_labels = data_partition(train_sequence_sets[num_fold_train_sequence_sets:], self.labels_key)
+            validation_sequence_sets_indices_fold = list(set(range(number_of_sequence_sets_on_train_fold)) - \
+                                                         set(train_sequence_sets_indices_fold))
+            validation_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
+                                             for data_sequence_set_index in validation_sequence_sets_indices_fold]
+
+            fold_train_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
+                                                    for data_sequence_set in train_sequence_sets_fold],
+                                                    test_proportion=0, validation_proportion=0,
+                                                    labels_names=self.labels_names, exact_merge=False,
+                                                    inputs_key=self.inputs_key, labels_key=self.labels_key)
+            fold_train_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
+                                                     for data_sequence_set in train_sequence_sets_fold],
+                                                    test_proportion=1, validation_proportion=0,
+                                                    labels_names=self.labels_names, exact_merge=False,
+                                                    inputs_key=self.inputs_key, labels_key=self.labels_key)
+
+            fold_validation_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
+                                                          for data_sequence_set in validation_sequence_sets_fold],
+                                                         test_proportion=0, validation_proportion=1,
+                                                         labels_names=self.labels_names, exact_merge=False,
+                                                         inputs_key=self.inputs_key, labels_key=self.labels_key)
+            fold_validation_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
+                                                          for data_sequence_set in validation_sequence_sets_fold],
+                                                         test_proportion=1, validation_proportion=1,
+                                                         labels_names=self.labels_names, exact_merge=False,
+                                                         inputs_key=self.inputs_key, labels_key=self.labels_key)
 
             return fold_train_inputs, fold_validation_inputs, fold_train_labels, fold_validation_labels
 
 
     @property
     def num_samples(self):
-        return sum([data_sequences_set.num_samples for data_sequences_set in self.data_sequences_sets])
+        return sum([len(data_sequences_set) for data_sequences_set in self.data_sequences_sets])
+
+    @property
+    def num_train_samples(self):
+        return sum([data_sequences_set.num_samples
+                    for data_sequences_set
+                    in self.data_sequences_sets[:self.num_train_sequence_sets]])
+
+    @property
+    def num_test_samples(self):
+        return sum([data_sequences_set.num_samples
+                    for data_sequences_set
+                    in self.data_sequences_sets[self.num_train_sequence_sets:]])
 
     @property
     def num_features(self):
@@ -1024,12 +1062,15 @@ class SequentialDataMerge(SequentialData):
 
     def sample_at(self, index):
         if index < self.num_samples:
-            data_sequences_set_index, sample_index = [(data_sequences_set_index, cummulative_num_sample - index)
-                                                      for data_sequences_set_index, cummulative_num_sample
-                                                      in enumerate(np.cumsum([data_sequences_set.num_samples
-                                                                              for data_sequences_set
-                                                                              in self.data_sequences_sets]))
-                                                      if index < cummulative_num_sample][0]
+            datasets_limits_cumsum = np.cumsum([len(data_sequences_set)
+                                                for data_sequences_set
+                                                in self.data_sequences_sets]).tolist()
+            data_sequences_set_index, sample_index = [(data_sequences_set_index, dataset_start_index + index)
+                                                      for data_sequences_set_index, (dataset_start_index,
+                                                                                     dataset_end_index)
+                                                      in enumerate(zip([0] + datasets_limits_cumsum,
+                                                                       datasets_limits_cumsum + [0]))
+                                                      if index < dataset_end_index][0]
             return self.data_sequences_sets[data_sequences_set_index][sample_index]
         else:
             raise IndexError('Requested sample at {} is out of bounds.'.format(index))
@@ -1038,9 +1079,7 @@ class SequentialDataMerge(SequentialData):
         if np.isscalar(key):
             return self.sample_at(key)
         else:
-            return np.concatenate([data_sequence_set.get_all_samples()
-                                   for data_sequence_set
-                                   in self.data_sequences_sets])[key]
+            return [self.sample_at(index) for index in range(self.num_samples)[key]]
 
 
 class EpochEegExperimentData(SequentialData):
@@ -1084,13 +1123,14 @@ class EpochEegExperimentData(SequentialData):
 
     @property
     def num_classes(self):
-        return np.array(self.valid_samples)[:, self.label_sample_position].max()
+        # Plus one since classes are considerated to be enumerated from 0.
+        return np.array(self.valid_samples)[:, self.label_sample_position].max() + 1
 
     def __getitem__(self, key):
         if np.isscalar(key):
             onset, label = self.valid_samples[key]
             # Omit empty stim channel and time dimmension.
-            return self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0], label
+            return np.transpose(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0]), label
         elif isinstance(key, tuple):
             if isinstance(key[0], slice):
                 if key[1] == self.label_sample_position:
@@ -1121,4 +1161,4 @@ class FmedLfaExperimentDataSet(SequentialDataMerge):
         super(FmedLfaExperimentDataSet, self).__init__([FmedLfaEegExperimentData(experiments_data_folder,
                                                                                  epoch_duration)
                                                         for experiments_data_folder in experiments_data_folders],
-                                                       test_proportion, validation_proportion, labels_names)
+                                                        test_proportion, validation_proportion, labels_names)
