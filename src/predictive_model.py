@@ -55,20 +55,18 @@ def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=[-3.,
     ax.set_aspect('equal', 'box')
 
 
-def plot_confusion_matrix_heatmap(classifications, labels, classes_labels=None, show_plot=False):
+def plot_confusion_matrix_heatmap(predictions, labels, classes_labels=None, show_plot=False):
     import seaborn as sns
     import matplotlib.pyplot as plt
     import pandas as pd
     from sklearn.metrics import confusion_matrix
 
     classes_labels = classes_labels if classes_labels is not None else [str(label) for label in np.unique(labels)]
-    predictions = np.array(classifications)[:, 0].tolist()
-
     classes_present = [classes_labels[class_idx]
                        for class_idx
                        in np.unique(np.array(np.unique(labels).tolist() + np.unique(predictions).tolist()))]
 
-    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels, y_pred=predictions),
+    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels.tolist(), y_pred=predictions),
                                        columns=classes_present, index=classes_present)
 
     # Calculate percentages.
@@ -320,7 +318,7 @@ class PredictiveModel(DistribuibleProgram):
                                       labels=validation_labels,
                                       operation=self._do_nothing_op,
                                       summary_writer=self._validation_summary_writer,
-                                      batch_size=len(validation_labels) // 10)
+                                      batch_size=max(len(validation_labels) // 10, 10))
 
                 self.save()
 
@@ -331,9 +329,9 @@ class PredictiveModel(DistribuibleProgram):
                                                 labels=dataset.test_labels,
                                                 operation=self._infer_class_op,
                                                 summary_writer=self._test_summary_writer,
-                                                batch_size=len(dataset.test_labels) // 10)
+                                                batch_size=max(len(dataset.test_labels) // 10, 10))
 
-        confusion_matrix_df = plot_confusion_matrix_heatmap(np.stack(classifications),
+        confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
                                                             dataset.test_labels,
                                                             classes_labels)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
@@ -717,14 +715,18 @@ def sample_inputs_labels(inputs, labels=None):
 
 
 def build_samples_indices_batches(num_samples, batch_size=1, shuffle_samples=False):
-    assert batch_size < num_samples, 'The batch requested is too large.'
+    assert batch_size <= num_samples, 'The batch requested is too large.'
     num_batches = num_samples // batch_size
     samples_indices = list(range(num_samples))
     if shuffle_samples:
         import random
         samples_indices = random.sample(samples_indices, k=num_samples)
-    return [samples_indices[batch_index * batch_size: batch_index * batch_size + batch_size]
-            for batch_index in range(num_batches)] + [samples_indices[num_batches * batch_size:]] # Batches' leftover.
+    samples_indices_batches = [samples_indices[batch_index * batch_size: batch_index * batch_size + batch_size]
+                               for batch_index in range(num_batches)]
+    if num_samples % batch_size == 0:
+        return samples_indices_batches
+    else:
+        return samples_indices_batches + [samples_indices[num_batches * batch_size:]] # Batches' leftover.
 
 
 class ArrayDataSet(DataSet):
