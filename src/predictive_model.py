@@ -264,14 +264,17 @@ class PredictiveModel(DistribuibleProgram):
                                       tf.maximum(tf.cast(epoch, tf.float32) - self._max_epoch_decay, 0.)
         return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
 
-    def report_execution(self, inputs, labels, operation, summary_writer=None, batched_samples=False):
+    def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False):
         '''Executes an operation while logging the loss and recording the model's summaries'''
+        batches_samples_indices = build_samples_indices_batches(num_samples=len(inputs),
+                                                                batch_size=batch_size,
+                                                                shuffle_samples=shuffle_samples)
         losses = []
         results = []
-        for input_index, (input, label) in enumerate(zip(inputs, labels)):
+        for batch_index, batch_samples in enumerate(batches_samples_indices):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              {'inputs:0': input if batched_samples else [input],
-                                                               'label:0': label if batched_samples else [label]})
+                                                              {'inputs:0': inputs[batch_samples],
+                                                               'label:0': labels[batch_samples]})
             results.append(result)
             losses.append(loss_value)
 
@@ -279,9 +282,9 @@ class PredictiveModel(DistribuibleProgram):
                 summary_writer.add_summary(summaries, global_step=self._session.run(self._global_step))
                 summary_writer.flush()
 
-            epoch_completion_perc = float(input_index / len(inputs)) * 100.
+            epoch_completion_perc = int(float(batch_index / len(batches_samples_indices)) * 100.)
             if epoch_completion_perc % 10 == 0:
-                logging.info('Epoch completion: {}%'.format(int(epoch_completion_perc)))
+                logging.info('Completion: {}%'.format(epoch_completion_perc))
 
         logging.info('Avg. Loss: {}'.format(np.array(losses).mean()))
         return results
@@ -302,15 +305,12 @@ class PredictiveModel(DistribuibleProgram):
                 Training.
                 Epoch: {} .
                 Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
-
-                batches_samples_indices = build_random_samples_indices_batches(num_samples=len(train_inputs),
-                                                                               batch_size=batch_size)
-                for batch_samples in batches_samples_indices:
-                    self.report_execution(inputs=[[train_inputs[sample_index] for sample_index in batch_samples]],
-                                          labels=[[train_labels[sample_index] for sample_index in batch_samples]],
-                                          operation=self._train_op,
-                                          summary_writer=self._train_summary_writer,
-                                          batched_samples=True)
+                self.report_execution(inputs=train_inputs,
+                                      labels=train_labels,
+                                      operation=self._train_op,
+                                      summary_writer=self._train_summary_writer,
+                                      batch_size=batch_size,
+                                      shuffle_samples=True)
 
                 # Validate new model's parameters.
                 logging.info(textwrap.dedent('''
@@ -319,18 +319,23 @@ class PredictiveModel(DistribuibleProgram):
                 self.report_execution(inputs=validation_inputs,
                                       labels=validation_labels,
                                       operation=self._do_nothing_op,
-                                      summary_writer=self._validation_summary_writer)
+                                      summary_writer=self._validation_summary_writer,
+                                      batch_size=len(validation_labels) // 10)
 
                 self.save()
 
     def test(self, dataset, classes_labels=None):
         # Test model's performance.
         logging.info('Test.')
-        classifications = self.report_execution(dataset.test_inputs, dataset.test_labels,
+        classifications = self.report_execution(inputs=dataset.test_inputs,
+                                                labels=dataset.test_labels,
                                                 operation=self._infer_class_op,
-                                                summary_writer=self._test_summary_writer)
+                                                summary_writer=self._test_summary_writer,
+                                                batch_size=len(dataset.test_labels) // 10)
 
-        confusion_matrix_df = plot_confusion_matrix_heatmap(classifications, dataset.test_labels, classes_labels)
+        confusion_matrix_df = plot_confusion_matrix_heatmap(np.stack(classifications),
+                                                            dataset.test_labels,
+                                                            classes_labels)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
@@ -711,14 +716,15 @@ def sample_inputs_labels(inputs, labels=None):
         return inputs[sample_index]
 
 
-def build_random_samples_indices_batches(num_samples, batch_size=1):
+def build_samples_indices_batches(num_samples, batch_size=1, shuffle_samples=False):
     assert batch_size < num_samples, 'The batch requested is too large.'
-    import random
     num_batches = num_samples // batch_size
-    samples_indices_shuffle = random.sample(range(num_samples), k=num_samples)
-    batches_samples = [samples_indices_shuffle[batch_index * batch_size: batch_index * batch_size + batch_size]
-                       for batch_index in range(num_batches)]
-    return batches_samples
+    samples_indices = list(range(num_samples))
+    if shuffle_samples:
+        import random
+        samples_indices = random.sample(samples_indices, k=num_samples)
+    return [samples_indices[batch_index * batch_size: batch_index * batch_size + batch_size]
+            for batch_index in range(num_batches)] + [samples_indices[num_batches * batch_size:]] # Batches' leftover.
 
 
 class ArrayDataSet(DataSet):
@@ -785,7 +791,7 @@ class ArrayDataSet(DataSet):
         return self.num_train_samples // batch_size
 
     def get_train_sample_batch(self, batch_size):
-        return build_random_samples_indices_batches(self.train_inputs, self.train_labels, batch_size)
+        return build_samples_indices_batches(self.train_inputs, self.train_labels, batch_size)
 
     def classes_distribution(self, show_chart=True):
         classes_histogram_df, ax = dataset_class_distribution(self.get_all_samples()[1], self.labels_names,
@@ -937,7 +943,7 @@ class KeyPartialSequentialData(PartialSequentialData):
 
 
 def data_partition(data_sequence_sets, key):
-    return np.concatenate([data_sequence_set[:, key] for data_sequence_set in data_sequence_sets])
+    return SequentialDataMerge([data_sequence_set[:, key] for data_sequence_set in data_sequence_sets])
 
 
 def validate_train_labels(labels):
@@ -965,7 +971,7 @@ class SequentialDataMerge(SequentialData):
                                                  validation_proportion=validation_proportion,
                                                  labels_names=labels_names, **kwargs)
         else:
-            if test_proportion not in (0, 1):
+            if test_proportion not in (0, 1, None):
                 self.num_train_sequence_sets = int(round(len(data_sequences_sets) * (1 - test_proportion)))
                 self.num_test_sequence_sets = int(round(len(data_sequences_sets) * (test_proportion)))
                 assert self.num_train_sequence_sets + self.num_test_sequence_sets == len(self.data_sequences_sets)
@@ -1067,7 +1073,7 @@ class SequentialDataMerge(SequentialData):
             datasets_limits_cumsum = np.cumsum([len(data_sequences_set)
                                                 for data_sequences_set
                                                 in self.data_sequences_sets]).tolist()
-            data_sequences_set_index, sample_index = [(data_sequences_set_index, dataset_start_index + index)
+            data_sequences_set_index, sample_index = [(data_sequences_set_index, index - dataset_start_index)
                                                       for data_sequences_set_index, (dataset_start_index,
                                                                                      dataset_end_index)
                                                       in enumerate(zip([0] + datasets_limits_cumsum,
@@ -1081,7 +1087,10 @@ class SequentialDataMerge(SequentialData):
         if np.isscalar(key):
             return self.sample_at(key)
         else:
-            return [self.sample_at(index) for index in range(self.num_samples)[key]]
+            return [self.sample_at(index) for index in np.array(range(self.num_samples))[key]]
+
+    def tolist(self):
+        return [self.sample_at(sample_index) for sample_index in range(self.num_samples)]
 
 
 class EpochEegExperimentData(SequentialData):
