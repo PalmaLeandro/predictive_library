@@ -61,13 +61,13 @@ def plot_confusion_matrix_heatmap(predictions, labels, classes_labels=None, show
     import pandas as pd
     from sklearn.metrics import confusion_matrix
 
-    classes_labels = classes_labels if classes_labels is not None else [str(label) for label in np.unique(labels)]
-    classes_present = [classes_labels[class_idx]
-                       for class_idx
-                       in np.unique(np.array(np.unique(labels).tolist() + np.unique(predictions).tolist()))]
+    possible_classes_indices = np.unique(np.array(np.unique(labels).tolist() + np.unique(predictions).tolist()))
+    possible_classes_labels = np.array(classes_labels)[possible_classes_indices] if classes_labels is not None \
+                              else [str(class_index) for class_index in possible_classes_indices]
+
 
     confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels.tolist(), y_pred=predictions),
-                                       columns=classes_present, index=classes_present)
+                                       columns=possible_classes_labels, index=possible_classes_labels)
 
     # Calculate percentages.
     confusion_matrix_df = confusion_matrix_df.div(confusion_matrix_df.sum(axis=1), axis=0)
@@ -322,7 +322,7 @@ class PredictiveModel(DistribuibleProgram):
 
                 self.save()
 
-    def test(self, dataset, classes_labels=None):
+    def test(self, dataset):
         # Test model's performance.
         logging.info('Test.')
         classifications = self.report_execution(inputs=dataset.test_inputs,
@@ -333,7 +333,7 @@ class PredictiveModel(DistribuibleProgram):
 
         confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
                                                             dataset.test_labels,
-                                                            classes_labels)
+                                                            dataset.label_names)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
@@ -666,6 +666,10 @@ class IterativeNN(PredictiveModel):
 
 class DataSet(object):
 
+    @property
+    def label_names(self):
+        pass
+
     def get_all_samples(self):
         pass
 
@@ -742,6 +746,10 @@ class ArrayDataSet(DataSet):
                                                                                                         labels,
                                                                                         test_size=test_proportion)
             self.validation_proportion = validation_proportion
+
+    @property
+    def label_names(self):
+        return self.labels_names if self.labels_names is not None else [str(label) for label in range(self.num_classes)]
 
     @property
     def num_samples(self):
