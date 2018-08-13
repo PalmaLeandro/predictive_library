@@ -688,7 +688,7 @@ def dataset_class_distribution(labels, labels_names=None, show_table=True, plot_
     if not show_table and not plot_chart:
         return classes_histogram
     import pandas as pd
-    labels_names = labels_names or [str(class_index) for class_index in range(labels.max())]
+    labels_names = labels_names or [str(class_index) for class_index in classes_histogram[0]]
     classes_histogram_df = pd.DataFrame({'class': [labels_names[class_index]
                                                    for class_index, class_num_samples
                                                    in zip(*classes_histogram)],
