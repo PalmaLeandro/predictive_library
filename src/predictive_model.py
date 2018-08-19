@@ -246,8 +246,11 @@ class PredictiveModel(DistribuibleProgram):
         return tf.identity(inputs, name=self.name)
 
     def build_loss(self, label, **kwargs):
-        return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op,
-                                                                             labels=label), name='xentropy_mean')
+        #return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op,
+        #                                                                     labels=label), name='xentropy_mean')
+        return tf.reduce_mean(tf.squared_difference(tf.nn.softmax(self._inference_op),
+                                                    tf.one_hot(label, self._inference_op.get_shape().dims[-1])),
+                              name='squared_error_mean')
 
     def build_training(self, max_gradient_norm=5.):
         '''Defines Gradient Descent with clipped norms as default training method.'''
@@ -262,17 +265,17 @@ class PredictiveModel(DistribuibleProgram):
                                       tf.maximum(tf.cast(epoch, tf.float32) - self._max_epoch_decay, 0.)
         return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
 
-    def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False):
+    def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False,
+                         return_batches_samples_indices=False):
         '''Executes an operation while logging the loss and recording the model's summaries'''
-        batches_samples_indices = build_samples_indices_batches(num_samples=len(inputs),
-                                                                batch_size=batch_size,
-                                                                shuffle_samples=shuffle_samples)
+        batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
         losses = []
         results = []
         for batch_index, batch_samples in enumerate(batches_samples_indices):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
                                                               {'inputs:0': inputs[batch_samples],
                                                                'label:0': labels[batch_samples]})
+
             results.append(result)
             losses.append(loss_value)
 
@@ -285,7 +288,7 @@ class PredictiveModel(DistribuibleProgram):
                 logging.info('Completion: {}%'.format(epoch_completion_perc))
 
         logging.info('Avg. Loss: {}'.format(np.array(losses).mean()))
-        return results
+        return results if return_batches_samples_indices is False else results, batches_samples_indices
 
 
     def train(self, dataset, num_epochs, validation_size=0.2, batch_size=20):
@@ -510,10 +513,10 @@ class TransformationPipeline(DeepPredictiveModel):
         pass
 
     def build_training(self, max_gradient_norm=5.):
-        pass
+        return self._do_nothing_op
 
     def build_loss(self, label, **kwargs):
-        pass
+        return tf.constant(0.)
 
 
 class PredictiveSequenceModel(PredictiveModel):
@@ -739,12 +742,13 @@ class ArrayDataSet(DataSet):
                  test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
         self.labels_names = labels_names
         if test_proportion is None:
-            self.train_inputs, self.train_labels = inputs, labels
-            self.test_inputs, self.test_labels = inputs, labels
+            self._train_inputs, self._train_labels = inputs, labels
+            self._test_inputs, self._test_labels = inputs, labels
         else:
-            self.train_inputs, self.test_inputs, self.train_labels, self.test_labels = train_test_split(inputs,
-                                                                                                        labels,
-                                                                                        test_size=test_proportion)
+            self._train_inputs, \
+            self._test_inputs, \
+            self._train_labels, \
+            self._test_labels = train_test_split(inputs, labels, test_size=test_proportion)
             self.validation_proportion = validation_proportion
 
     @property
@@ -760,16 +764,16 @@ class ArrayDataSet(DataSet):
 
     @property
     def num_train_samples(self):
-        return len(self.train_inputs)
+        return len(self._train_inputs)
 
     @property
     def num_test_samples(self):
-        return len(self.train_inputs)
+        return len(self._train_inputs)
 
     @property
     def num_classes(self):
         # Consider labels as indices being counted from zero.
-        return self.train_labels.max() + 1
+        return self._train_labels.max() + 1
 
     @property
     def num_features(self):
@@ -778,21 +782,46 @@ class ArrayDataSet(DataSet):
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
     def provide_train_validation_random_partition(self, validation_proportion=None):
-        return train_test_split(self.train_inputs, self.train_labels,
+        return train_test_split(self._train_inputs, self._train_labels,
                                 test_size=validation_proportion or self.validation_proportion)
 
+
+    @property
+    def train_inputs(self):
+        return self._train_inputs
+
+    @property
+    def train_labels(self):
+        return self._train_labels
+
+    @property
+    def test_inputs(self):
+        return self._test_inputs
+
+    @property
+    def test_labels(self):
+        return self._test_labels
+
+    @property
+    def inputs(self):
+        return np.concatenate([self.train_inputs, self.test_inputs])
+
+    @property
+    def labels(self):
+        return np.concatenate([self.train_labels, self.test_labels])
+
     def get_all_samples(self):
-        return np.concatenate([self.train_inputs, self.test_inputs]), \
-               np.concatenate([self.train_labels, self.test_labels])
+        return np.concatenate([self._train_inputs, self._test_inputs]), \
+               np.concatenate([self._train_labels, self._test_labels])
 
     def get_sample(self):
         return sample_inputs_labels(*self.get_all_samples())
 
     def get_train_sample(self):
-        return sample_inputs_labels(self.train_inputs, self.train_labels)
+        return sample_inputs_labels(self._train_inputs, self._train_labels)
 
     def get_test_sample(self):
-        return sample_inputs_labels(self.test_inputs, self.test_labels)
+        return sample_inputs_labels(self._test_inputs, self._test_labels)
 
     def num_batches(self, batch_size):
         return self.num_samples // batch_size
@@ -838,6 +867,9 @@ class ArrayDataSet(DataSet):
         test_samples_histogram_df['dataset'] = 'Test'
         return pd.concat([train_samples_histogram_df, test_samples_histogram_df]).pivot(index='class',
                                                                                         columns='dataset')
+
+    def principal_components(self):
+        return np.linalg.svd(self.get_all_samples(), full_matrices=False)
 
 
 class CSVDataSet(ArrayDataSet):
@@ -971,6 +1003,9 @@ class SequentialDataMerge(SequentialData):
                  exact_merge=False, inputs_key=0, labels_key=1, **kwargs):
         self.data_sequences_sets = data_sequences_sets
         self.exact_merge = exact_merge
+        self.inputs_key = inputs_key
+        self.labels_key = labels_key
+        self.labels_names = labels_names
 
         if exact_merge:
             super(SequentialData, self).__init__(inputs=KeyPartialSequentialData(inputs_key,
@@ -986,9 +1021,6 @@ class SequentialDataMerge(SequentialData):
                 self.num_test_sequence_sets = int(round(len(data_sequences_sets) * (test_proportion)))
                 assert self.num_train_sequence_sets + self.num_test_sequence_sets == len(self.data_sequences_sets)
                 self.test_sequence_sets = self.data_sequences_sets[self.num_train_sequence_sets:]
-                self.inputs_key = inputs_key
-                self.labels_key = labels_key
-                self.labels_names = labels_names
 
     @property
     def train_inputs(self):
@@ -997,6 +1029,7 @@ class SequentialDataMerge(SequentialData):
     @property
     def train_labels(self):
         return data_partition(self.data_sequences_sets[:self.num_train_sequence_sets], self.labels_key)
+
     @property
     def test_inputs(self):
         return data_partition(self.data_sequences_sets[self.num_train_sequence_sets:], self.inputs_key)
@@ -1004,6 +1037,14 @@ class SequentialDataMerge(SequentialData):
     @property
     def test_labels(self):
         return data_partition(self.data_sequences_sets[self.num_train_sequence_sets:], self.labels_key)
+
+    @property
+    def inputs(self):
+        return data_partition(self.data_sequences_sets, self.inputs_key)
+
+    @property
+    def labels(self):
+        return data_partition(self.data_sequences_sets, self.labels_key)
 
     def provide_train_validation_random_partition(self, validation_proportion=None):
         validation_proportion = validation_proportion or self.validation_proportion
@@ -1020,7 +1061,7 @@ class SequentialDataMerge(SequentialData):
             train_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
                                         for data_sequence_set_index in train_sequence_sets_indices_fold]
 
-            validation_sequence_sets_indices_fold = list(set(range(number_of_sequence_sets_on_train_fold)) - \
+            validation_sequence_sets_indices_fold = list(set(range(self.num_train_sequence_sets)) - \
                                                          set(train_sequence_sets_indices_fold))
             validation_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
                                              for data_sequence_set_index in validation_sequence_sets_indices_fold]
@@ -1049,7 +1090,6 @@ class SequentialDataMerge(SequentialData):
 
             return fold_train_inputs, fold_validation_inputs, fold_train_labels, fold_validation_labels
 
-
     @property
     def num_samples(self):
         return sum([len(data_sequences_set) for data_sequences_set in self.data_sequences_sets])
@@ -1076,7 +1116,7 @@ class SequentialDataMerge(SequentialData):
 
     @property
     def num_classes(self):
-        return max(*[data_sequences_set.num_classes for data_sequences_set in self.data_sequences_sets])
+        return max(*([data_sequences_set.num_classes for data_sequences_set in self.data_sequences_sets] + [0]))
 
     def sample_at(self, index):
         if index < self.num_samples:
@@ -1147,6 +1187,14 @@ class EpochEegExperimentData(SequentialData):
         # Plus one since classes are considerated to be enumerated from 0.
         return np.array(self.valid_samples)[:, self.label_sample_position].max() + 1
 
+    @property
+    def inputs_key(self):
+        return self.eeg_signal_sample_position
+
+    @property
+    def labels_key(self):
+        return self.label_sample_position
+
     def __getitem__(self, key):
         if np.isscalar(key):
             onset, label = self.valid_samples[key]
@@ -1154,11 +1202,10 @@ class EpochEegExperimentData(SequentialData):
             return np.transpose(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0]), label
         elif isinstance(key, tuple):
             if isinstance(key[0], slice):
-                if key[1] == self.label_sample_position:
+                if key[1] == self.labels_key:
                     return np.array(self.valid_samples)[key]
-                if key[1] == self.eeg_signal_sample_position:
-                    return KeyPartialSequentialData(data_key=self.eeg_signal_sample_position,
-                                                    complete_sequential_data=self)
+                if key[1] == self.inputs_key:
+                    return KeyPartialSequentialData(data_key=self.inputs_key, complete_sequential_data=self)
 
 
 class FmedLfaEegExperimentData(EpochEegExperimentData):
@@ -1178,8 +1225,11 @@ class FmedLfaEegExperimentData(EpochEegExperimentData):
 
 class FmedLfaExperimentDataSet(SequentialDataMerge):
 
-    def __init__(self, experiments_data_folders, epoch_duration, test_proportion, validation_proportion, labels_names):
-        super(FmedLfaExperimentDataSet, self).__init__([FmedLfaEegExperimentData(experiments_data_folder,
-                                                                                 epoch_duration)
-                                                        for experiments_data_folder in experiments_data_folders],
-                                                        test_proportion, validation_proportion, labels_names)
+    def __init__(self, experiments_data_folders, epoch_duration, **kwargs):
+        eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration)
+                                for experiments_data_folder
+                                in experiments_data_folders]
+        super(FmedLfaExperimentDataSet, self).__init__(eeg_experiments_data,
+                                                       inputs_key=eeg_experiments_data[0].inputs_key,
+                                                       labels_key=eeg_experiments_data[0].labels_key,
+                                                       **kwargs)
