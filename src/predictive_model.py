@@ -269,13 +269,13 @@ class PredictiveModel(DistribuibleProgram):
                          return_batches_samples_indices=False, persist_to_path=None):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
+        num_batches, batch_size = np.array(batches_samples_indices).shape
+
+        expected_results_shape = (num_batches, batch_size) + \
+                                 tuple([dim.value for dim in operation.get_shape().dims if dim.value is not None])
+        results = [] if persist_to_path is None else np.memmap(filename=persist_to_path + self.name, dtype=np.float32,
+                                                               mode='w+', shape=expected_results_shape)
         losses = []
-        results = [] if persist_to_path is None else np.memmap(filename=persist_to_path + self.name,
-                                                               dtype=np.float32,
-                                                               mode='w+',
-                                                               shape=tuple([dim.value or batch_size
-                                                                            for dim
-                                                                            in operation.get_shape().dims]))
         for batch_index, batch_samples in enumerate(batches_samples_indices):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
                                                               {'inputs:0': inputs[batch_samples],
@@ -284,7 +284,7 @@ class PredictiveModel(DistribuibleProgram):
             if persist_to_path is None:
                 results.append(result)
             else:
-                np.append(results, result)
+                results[batch_index] = result
 
             losses.append(loss_value)
 
