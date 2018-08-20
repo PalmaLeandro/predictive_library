@@ -266,17 +266,26 @@ class PredictiveModel(DistribuibleProgram):
         return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
 
     def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False,
-                         return_batches_samples_indices=False):
+                         return_batches_samples_indices=False, persist_to_path=None):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
         losses = []
-        results = []
+        results = [] if persist_to_path is None else np.memmap(filename=persist_to_path + self.name,
+                                                               dtype=np.float32,
+                                                               mode='w+',
+                                                               shape=tuple([dim.value or batch_size
+                                                                            for dim
+                                                                            in operation.get_shape().dims]))
         for batch_index, batch_samples in enumerate(batches_samples_indices):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
                                                               {'inputs:0': inputs[batch_samples],
                                                                'label:0': labels[batch_samples]})
 
-            results.append(result)
+            if persist_to_path is None:
+                results.append(result)
+            else:
+                np.append(results, result)
+
             losses.append(loss_value)
 
             if summary_writer is not None:
@@ -867,9 +876,6 @@ class ArrayDataSet(DataSet):
         test_samples_histogram_df['dataset'] = 'Test'
         return pd.concat([train_samples_histogram_df, test_samples_histogram_df]).pivot(index='class',
                                                                                         columns='dataset')
-
-    def principal_components(self):
-        return np.linalg.svd(self.get_all_samples(), full_matrices=False)
 
 
 class CSVDataSet(ArrayDataSet):
