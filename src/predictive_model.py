@@ -269,7 +269,7 @@ class PredictiveModel(DistribuibleProgram):
                          return_batches_samples_indices=False, persist_to_path=None):
         '''Executes an operation while logging the loss and recording the model's summaries'''
         batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
-        num_batches, batch_size = np.array(batches_samples_indices).shape
+        num_batches = len(batches_samples_indices)
 
         expected_results_shape = (num_batches, batch_size) + \
                                  tuple([dim.value for dim in operation.get_shape().dims if dim.value is not None])
