@@ -155,7 +155,7 @@ class DistribuibleProgram(object):
     def __init__(self, cluster_machines):
         self._task_index = cluster_machines.index(get_current_machine_ip() + ':0')
 
-        tmp_cluster = tf.train.ClusterSpec({'tmp': cluster_machines})
+        tmp_cluster = tf.train.ClusterSpec({'tmp': cluster_machines}) #
 
         self._ps_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
         self._worker_server = tf.train.Server(tmp_cluster, job_name='tmp', task_index=self._task_index)
@@ -284,7 +284,8 @@ class PredictiveModel(DistribuibleProgram):
             if persist_to_path is None:
                 results.append(result)
             else:
-                results[batch_index] = result
+                results[batch_index] = result if result.shape[0] == batch_size \
+                                            else np.pad(result, np.zeros(batch_size - result.shape[0]))
 
             losses.append(loss_value)
 
