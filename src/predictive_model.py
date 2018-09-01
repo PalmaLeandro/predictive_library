@@ -284,8 +284,14 @@ class PredictiveModel(DistribuibleProgram):
             if persist_to_path is None:
                 results.append(result)
             else:
-                results[batch_index] = result if result.shape[0] == batch_size \
-                                            else np.pad(result, np.zeros(batch_size - result.shape[0]))
+                if result.shape[0] < batch_size:
+                    # This is a batch leftover, we need to add samples to fill the result.
+                    results[batch_index] = np.concatenate([result, np.array([np.zeros(result.shape[1:])
+                                                                             for artificial_sample
+                                                                             in range(batch_size - result.shape[0])])])
+                else:
+                    # All good.
+                    results[batch_index] = result
 
             losses.append(loss_value)
 
