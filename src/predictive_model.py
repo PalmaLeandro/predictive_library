@@ -474,6 +474,14 @@ class BatchReshape(IntermidiateTransformation):
         return super(BatchReshape, self).build_model(tf.reshape(inputs, [-1, *new_shape]))
 
 
+class BatchSlice(IntermidiateTransformation):
+
+    def build_model(self, inputs, start=None, stop=None, **kwargs):
+        input_slice = tuple(np.repeat(slice(None, None, None), len(inputs.get_shape()) - 1).tolist() +
+                              [slice(start, stop, None)])
+        return super(BatchSlice, self).build_model(inputs[input_slice])
+
+
 class SigmoidActivation(IntermidiateTransformation):
 
     def build_model(self, inputs, **kwargs):
@@ -1115,11 +1123,11 @@ class SequentialDataMerge(SequentialData):
 
     @property
     def num_features(self):
-        return self.data_sequences_sets[0].num_features
+        return self.data_sequences_sets[0].shape[-1]
 
     @property
     def steps_per_sample(self):
-        return self.data_sequences_sets[0].steps_per_sample
+        return self.data_sequences_sets[0].shape[-2]
 
     @property
     def num_classes(self):
@@ -1155,9 +1163,11 @@ class EpochEegExperimentData(SequentialData):
     eeg_signal_sample_position = 0
     label_sample_position = 1
 
-    def __init__(self, files_folder_path, epoch_duration):
+    def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None):
         self.files_folder_path = files_folder_path
         self.epoch_duration = epoch_duration
+        self.low_frequencies_cut = low_frequencies_cut
+        self.high_frequencies_cut = high_frequencies_cut
 
         # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
         signal_classification = self.signal_classification
@@ -1206,7 +1216,10 @@ class EpochEegExperimentData(SequentialData):
         if np.isscalar(key):
             onset, label = self.valid_samples[key]
             # Omit empty stim channel and time dimmension.
-            return np.transpose(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0]), label
+            import mne
+            return np.transpose(mne.filter.filter_data(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0],
+                                                       self.eeg_signals.info.get('sfreq'), self.low_frequencies_cut,
+                                                       self.high_frequencies_cut)), label
         elif isinstance(key, tuple):
             if isinstance(key[0], slice):
                 if key[1] == self.labels_key:
