@@ -491,6 +491,29 @@ class BatchSlice(IntermidiateTransformation):
         return super(BatchSlice, self).build_model(inputs[input_slice])
 
 
+def load_stored_parameters(parameters):
+    if type(parameters) is np.ndarray:
+        return parameters
+
+    if isinstance(parameters, str):
+        if parameters.split('.')[-1] == 'npy':
+            return np.load(parameters)
+    raise NotImplementedError()
+
+
+class HyperplaneProjection(IntermidiateTransformation):
+
+    def __init__(self, normal, bias=None, **kwargs):
+        self.normal = tf.constant(load_stored_parameters(normal))
+        self.bias = tf.constant(load_stored_parameters(bias)) if bias is not None \
+            else tf.zeros(self.normal.get_shape().dims[0].value)
+        super(HyperplaneProjection, self).__init__(**kwargs)
+
+    def build_model(self, inputs, **kwargs):
+        return super(HyperplaneProjection, self).build_model(tf.matmul(inputs, tf.transpose(self.normal)) + self.bias,
+                                                             **kwargs)
+
+
 class SigmoidActivation(IntermidiateTransformation):
 
     def build_model(self, inputs, **kwargs):
