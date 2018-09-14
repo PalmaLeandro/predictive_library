@@ -514,6 +514,18 @@ class HyperplaneProjection(IntermidiateTransformation):
                                                              **kwargs)
 
 
+class ScikitLearnEstimatorTransform(IntermidiateTransformation):
+
+    def __init__(self, estimator, **kwargs):
+        from sklearn.externals import joblib
+        self.estimator = joblib.load(estimator) if isinstance(estimator, str) else estimator
+        super(ScikitLearnEstimatorTransform, self).__init__(**kwargs)
+
+    def build_model(self, inputs, **kwargs):
+        return super(ScikitLearnEstimatorTransform, self).build_model(self.estimator.transform(inputs), **kwargs)
+
+
+
 class SigmoidActivation(IntermidiateTransformation):
 
     def build_model(self, inputs, **kwargs):
@@ -1190,12 +1202,15 @@ class SequentialDataMerge(SequentialData):
         return [self.sample_at(sample_index) for sample_index in range(self.num_samples)]
 
 
+
+
 class EpochEegExperimentData(SequentialData):
 
     eeg_signal_sample_position = 0
     label_sample_position = 1
 
-    def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None):
+    def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None,
+                 transformation=None, **kwargs):
         self.files_folder_path = files_folder_path
         self.epoch_duration = epoch_duration
         self.low_frequencies_cut = low_frequencies_cut
@@ -1207,6 +1222,16 @@ class EpochEegExperimentData(SequentialData):
         self.valid_samples = [(onset, label) for onset_index, (onset, label) in enumerate(signal_classification)
                               if onset_index + 1 < len(signal_classification)
                               and (signal_classification[onset_index + 1][0] - onset) == steps_per_sample]
+        self.transformation = transformation if not isinstance(transformation, str) \
+                                             else self._build_transformation(transformation)
+
+    def _build_transformation(self, transformation):
+        if transformation == 'standardization':
+            from sklearn.preprocessing import StandardScaler
+            transformation = StandardScaler()
+            transformation.partial_fit(self.eeg_signals.to_data_frame().values[:, :self.num_features])
+            return transformation
+        raise NotImplementedError()
 
     @property
     def eeg_signals(self):
@@ -1244,14 +1269,20 @@ class EpochEegExperimentData(SequentialData):
     def labels_key(self):
         return self.label_sample_position
 
+    def _transform_raw_signal_data(self, raw_data):
+        import mne
+        # Frequencies filtering.
+        result = mne.filter.filter_data(raw_data, self.eeg_signals.info.get('sfreq'),
+                                        self.low_frequencies_cut, self.high_frequencies_cut)
+
+        # Feature transformation(standardization or others).
+        return self.transformation.transform(result.T)
+
     def __getitem__(self, key):
         if np.isscalar(key):
             onset, label = self.valid_samples[key]
             # Omit empty stim channel and time dimmension.
-            import mne
-            return np.transpose(mne.filter.filter_data(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0],
-                                                       self.eeg_signals.info.get('sfreq'), self.low_frequencies_cut,
-                                                       self.high_frequencies_cut)), label
+            return self._transform_raw_signal_data(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0]), label
         elif isinstance(key, tuple):
             if isinstance(key[0], slice):
                 if key[1] == self.labels_key:
@@ -1278,7 +1309,7 @@ class FmedLfaEegExperimentData(EpochEegExperimentData):
 class FmedLfaExperimentDataSet(SequentialDataMerge):
 
     def __init__(self, experiments_data_folders, epoch_duration, **kwargs):
-        eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration)
+        eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration, **kwargs)
                                 for experiments_data_folder
                                 in experiments_data_folders]
         super(FmedLfaExperimentDataSet, self).__init__(eeg_experiments_data,
