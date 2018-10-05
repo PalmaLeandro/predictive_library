@@ -447,7 +447,7 @@ class FastFourierTransform(IntermidiateTransformation):
     def build_model(self, inputs, frame_length, frame_step=None, **kwargs):
         frame_step = frame_step if frame_step is not None else frame_length
         stfts = tf.contrib.signal.stft(inputs, frame_length=frame_length, frame_step=frame_step, pad_end=True)
-        return super(FastFourierTransform, self).build_model(tf.squeeze(stfts, axis=2))
+        return super(FastFourierTransform, self).build_model(stfts)
 
 
 class PowerDensityEstimation(FastFourierTransform):
@@ -490,6 +490,17 @@ class BatchSlice(IntermidiateTransformation):
                               [slice(start, stop, None)])
         return super(BatchSlice, self).build_model(inputs[input_slice])
 
+class BatchAggregation(IntermidiateTransformation):
+
+    def build_model(self, inputs, aggregation, dimensions=None, **kwargs):
+        if dimensions is None:
+            # not_batch_dimensions_indexes:
+            dimensions = [dimension_index for dimension_index in range(len(inputs.get_shape()))][1:]
+        if aggregation == 'mean':
+            return super(BatchAggregation, self).build_model(tf.reduce_mean(inputs, dimensions))
+
+
+
 
 def load_stored_parameters(parameters):
     if type(parameters) is np.ndarray:
@@ -525,7 +536,6 @@ class ScikitLearnEstimatorTransform(IntermidiateTransformation):
         return super(ScikitLearnEstimatorTransform, self).build_model(self.estimator.transform(inputs), **kwargs)
 
 
-
 class SigmoidActivation(IntermidiateTransformation):
 
     def build_model(self, inputs, **kwargs):
@@ -535,18 +545,16 @@ class SigmoidActivation(IntermidiateTransformation):
 class DeepPredictiveModel(PredictiveModel):
     '''A model that concatenates several PredictiveModels.'''
 
-    def __init__(self, num_features=None, inner_models_arguments=None, **kwargs):
-        # Define if user provided arguments for every model or they would have to share the same.
-        inner_models_arguments = inner_models_arguments or np.repeat(kwargs, len(inner_models_arguments))
-        super(DeepPredictiveModel, self).__init__(num_features, inner_models_arguments=inner_models_arguments, **kwargs)
+    def __init__(self, inner_models=None, **kwargs):
+        inner_models = [model if isinstance(model, tuple) else (model, kwargs) for model in inner_models]
+        super(DeepPredictiveModel, self).__init__(inner_models=inner_models, **kwargs)
 
-    def build_model(self, inputs, inner_models_classes, inner_models_arguments=None, **kwargs):
+    def build_model(self, inputs, inner_models, **kwargs):
         current_input = inputs
         current_input_dimension = [int(dimension) for dimension in inputs.get_shape().dims[1:]]
         self.inner_models_names = []
         # Instantiate every model using the provided arguments.
-        for inner_model_index, (inner_model_class, inner_model_arguments) in enumerate(zip(inner_models_classes,
-                                                                                           inner_models_arguments)):
+        for inner_model_index, (inner_model_class, inner_model_arguments) in enumerate(inner_models):
             inner_model_arguments['num_features'] = current_input_dimension
             inner_model = inner_model_class(is_inner_model=True, **inner_model_arguments)
             inner_model_name = inner_model.name + '_' + str(inner_model_index)
@@ -1202,8 +1210,6 @@ class SequentialDataMerge(SequentialData):
         return [self.sample_at(sample_index) for sample_index in range(self.num_samples)]
 
 
-
-
 class EpochEegExperimentData(SequentialData):
 
     eeg_signal_sample_position = 0
@@ -1273,10 +1279,10 @@ class EpochEegExperimentData(SequentialData):
         import mne
         # Frequencies filtering.
         result = mne.filter.filter_data(raw_data, self.eeg_signals.info.get('sfreq'),
-                                        self.low_frequencies_cut, self.high_frequencies_cut)
+                                        self.low_frequencies_cut, self.high_frequencies_cut).T
 
         # Feature transformation(standardization or others).
-        return self.transformation.transform(result.T)
+        return self.transformation.transform(result) if self.transformation is not None else result
 
     def __getitem__(self, key):
         if np.isscalar(key):
