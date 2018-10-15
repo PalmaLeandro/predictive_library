@@ -191,7 +191,7 @@ class DistribuibleProgram(object):
 
 class PredictiveModel(DistribuibleProgram):
 
-    def __init__(self, num_features=None,
+    def __init__(self, num_features=[None],
                  initial_learning_rate=1., learning_rate_decay=0.95, max_epoch_decay=0,
                  cluster_machines=[get_current_machine_ip() + ':0'],
                  log_dir=None, erase_log_dir=True,
@@ -215,14 +215,18 @@ class PredictiveModel(DistribuibleProgram):
                     self._global_step = tf.Variable(0, name='global_step', trainable=False)
                     self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
                     self._update_learning_rate_op = self.build_learning_rate_update(**kwargs)
+
                     inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
                     label = tf.placeholder(dtype=tf.int64, shape=[None], name='label')
+
                     self._do_nothing_op = tf.no_op()
                     self._inference_op = self.build_model(inputs, num_features=num_features, **kwargs)
                     self._infer_class_op = tf.argmax(self._inference_op, axis=1)
-                    self._loss_op = self.build_loss(label, **kwargs)
+                    self._label_op = self.build_label(label)
+                    self._loss_op = self.build_loss(self._label_op, self._inference_op, **kwargs)
                     self._train_op = self.build_training()
                     self._init_summaries(log_dir, erase_log_dir)
+
                     # This is required so that tensorflow realizes the true amount of possible classes.
                     self._session.run(self._train_op, {'inputs:0': [np.tile(0, num_features)],
                                                        'label:0': [self._inference_op.shape[-1].value - 1]})
@@ -245,12 +249,11 @@ class PredictiveModel(DistribuibleProgram):
         '''
         return tf.identity(inputs, name=self.name)
 
-    def build_loss(self, label, **kwargs):
-        #return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self._inference_op,
-        #                                                                     labels=label), name='xentropy_mean')
-        return tf.reduce_mean(tf.squared_difference(tf.nn.softmax(self._inference_op),
-                                                    tf.one_hot(label, self._inference_op.get_shape().dims[-1])),
-                              name='squared_error_mean')
+    def build_label(self, label):
+        return tf.identity(tf.cast(label, tf.float32), name='label')
+
+    def build_loss(self, label, prediction, **kwargs):
+        return tf.reduce_mean(tf.squared_difference(label, prediction, name='squared_error'), name='mean_squared_error')
 
     def build_training(self, max_gradient_norm=5.):
         '''Defines Gradient Descent with clipped norms as default training method.'''
@@ -428,6 +431,17 @@ class PredictiveModel(DistribuibleProgram):
             plt.show()
 
 
+class ClassificationModel(PredictiveModel):
+
+    def build_label(self, label):
+        return super(ClassificationModel, self).build_label(tf.one_hot(label, self._inference_op.get_shape().dims[-1]))
+
+    def build_loss(self, label, prediction, **kwargs):
+        return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
+                                                                             labels=label,
+                                                                             name='cross_entropy'),
+                              name='cross_entropy_mean')
+
 class IntermidiateTransformation(PredictiveModel):
     def train(self, samples, labels, num_epochs, validation_size):
         pass
@@ -499,9 +513,6 @@ class BatchAggregation(IntermidiateTransformation):
         if aggregation == 'mean':
             return super(BatchAggregation, self).build_model(tf.reduce_mean(inputs, dimensions))
 
-
-
-
 def load_stored_parameters(parameters):
     if type(parameters) is np.ndarray:
         return parameters
@@ -542,7 +553,13 @@ class SigmoidActivation(IntermidiateTransformation):
         return super(SigmoidActivation, self).build_model(tf.nn.sigmoid(inputs))
 
 
-class DeepPredictiveModel(PredictiveModel):
+class SoftmaxActivation(IntermidiateTransformation):
+
+    def build_model(self, inputs, **kwargs):
+        return super(SoftmaxActivation, self).build_model(tf.nn.softmax(inputs))
+
+
+class DeepPredictiveModel(ClassificationModel):
     '''A model that concatenates several PredictiveModels.'''
 
     def __init__(self, inner_models=None, **kwargs):
@@ -589,7 +606,7 @@ class TransformationPipeline(DeepPredictiveModel):
         return tf.constant(0.)
 
 
-class PredictiveSequenceModel(PredictiveModel):
+class PredictiveSequenceModel(ClassificationModel):
     '''A model that makes inferences over a sequenced input.'''
 
     def build_model_evolution(self, input, **kwargs):
@@ -717,7 +734,7 @@ class BasicRNN(PredictiveRecurrentModel):
         return hidden_state, hidden_state
 
 
-class IterativeNN(PredictiveModel):
+class IterativeNN(ClassificationModel):
 
     def build_model(self, input, num_units, max_it, **kwargs):
 
@@ -1120,6 +1137,7 @@ class SequentialDataMerge(SequentialData):
         else:
             # Here we go.
             import random
+
             train_sequence_sets = self.data_sequences_sets[:self.num_train_sequence_sets]
             number_of_sequence_sets_on_train_fold = int(round(len(train_sequence_sets) * (1 - validation_proportion)))
 
