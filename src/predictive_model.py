@@ -228,7 +228,7 @@ class PredictiveModel(DistribuibleProgram):
                     self._init_summaries(log_dir, erase_log_dir)
 
                     # This is required so that tensorflow realizes the true amount of possible classes.
-                    self._session.run(self._train_op, {'inputs:0': [np.tile(0, num_features)],
+                    self._session.run(self._train_op, {'inputs:0': [np.tile(0, [dim or 1 for dim in num_features])],
                                                        'label:0': [self._inference_op.shape[-1].value - 1]})
 
     def _init_summaries(self, log_dir=None, erase_log_dir=True):
@@ -250,7 +250,7 @@ class PredictiveModel(DistribuibleProgram):
         return tf.identity(inputs, name=self.name)
 
     def build_label(self, label):
-        return tf.identity(tf.cast(label, tf.float32), name='label')
+        return tf.identity(label, name='label')
 
     def build_loss(self, label, prediction, **kwargs):
         return tf.reduce_mean(tf.squared_difference(label, prediction, name='squared_error'), name='mean_squared_error')
@@ -434,13 +434,14 @@ class PredictiveModel(DistribuibleProgram):
 class ClassificationModel(PredictiveModel):
 
     def build_label(self, label):
-        return super(ClassificationModel, self).build_label(tf.one_hot(label, self._inference_op.get_shape().dims[-1]))
+        return super(ClassificationModel, self).build_label(label)
 
     def build_loss(self, label, prediction, **kwargs):
         return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
                                                                              labels=label,
                                                                              name='cross_entropy'),
                               name='cross_entropy_mean')
+
 
 class IntermidiateTransformation(PredictiveModel):
     def train(self, samples, labels, num_epochs, validation_size):
@@ -568,7 +569,7 @@ class DeepPredictiveModel(ClassificationModel):
 
     def build_model(self, inputs, inner_models, **kwargs):
         current_input = inputs
-        current_input_dimension = [int(dimension) for dimension in inputs.get_shape().dims[1:]]
+        current_input_dimension = inputs.get_shape().dims[-1]
         self.inner_models_names = []
         # Instantiate every model using the provided arguments.
         for inner_model_index, (inner_model_class, inner_model_arguments) in enumerate(inner_models):
@@ -577,7 +578,6 @@ class DeepPredictiveModel(ClassificationModel):
             inner_model_name = inner_model.name + '_' + str(inner_model_index)
             with tf.variable_scope(inner_model_name):
                 current_input = inner_model.build_model(current_input, **inner_model_arguments)
-
                 current_input_dimension = [int(dimension) for dimension in current_input.get_shape().dims[1:]]
 
             self.inner_models_names.append(inner_model_name)
@@ -609,6 +609,9 @@ class TransformationPipeline(DeepPredictiveModel):
 class PredictiveSequenceModel(ClassificationModel):
     '''A model that makes inferences over a sequenced input.'''
 
+    def __init__(self, num_units, **kwargs):
+        self._num_units = num_units # Sadly this is required for Tensorflow  to iterate over arbitrary large sequences.
+
     def build_model_evolution(self, input, **kwargs):
         pass
 
@@ -619,72 +622,72 @@ class PredictiveSequenceModel(ClassificationModel):
         pass
 
     def build_model(self, input_sequence, **kwargs):
-
         '''
         Executes the model inference over each step of the inputs, evolving the model's internal representation,
         and outputs the final representation as result.
         The input_sequence is assumed to have the following shape:
             [batch_size, num_steps, num_features].
         '''
-        result = tf.no_op()
         self.reset(**kwargs)
-        for step in range(input_sequence.shape[1]):
-            result = self.build_model_evolution(input_sequence[:, step, :], **kwargs)
+
+        def condition(input_sequence, output, step):
+            return tf.less(step, tf.shape(input_sequence)[1])
+
+        def body(input_sequence, output, step):
+            output = self.build_model_evolution(input_sequence[:, step, :], **kwargs)
             # Avoid instantiating all the reusable variables again.
             tf.get_variable_scope().reuse_variables()
+            return input_sequence, output, step + 1
 
-        return result
+        loop_vars = [input_sequence, tf.zeros([tf.shape(input_sequence)[0], self._num_units]), tf.constant(0)]
+        input_sequence, output, step = tf.while_loop(condition, body, loop_vars)
+        return output
 
 
 class DeepPredictiveSequenceModel(PredictiveSequenceModel):
     '''A model that concatenates several PredictiveSequenceModels a every timestep of the input sequence.'''
 
-    def reset(self, inner_sequence_models_arguments, **kwargs):
-        for inner_sequence_model, inner_sequence_model_arguments in zip(self._inner_sequence_models,
-                                                                        inner_sequence_models_arguments):
+    def reset(self, inner_sequence_models, **kwargs):
+        for inner_sequence_model, (_, inner_sequence_model_arguments) in zip(self._inner_sequence_models,
+                                                                             inner_sequence_models):
             inner_sequence_model.reset(**inner_sequence_model_arguments)
 
-    def build_model(self, input_sequence, inner_sequence_models_classes, inner_sequence_models_arguments=None,
-                    **kwargs):
-        # Define if user provided arguments for every model or they would have to share the same.
-        inner_sequence_models_arguments = inner_sequence_models_arguments \
-                                          or np.repeat(kwargs, len(inner_sequence_models_classes))
+    def build_model(self, input_sequence, inner_sequence_models, **kwargs):
+        inner_sequence_models = [model if isinstance(model, tuple) else (model, kwargs)
+                                 for model in inner_sequence_models]
 
         self.inner_models_names = []
         self._inner_sequence_models = []
-        iterator = enumerate(zip(inner_sequence_models_classes, inner_sequence_models_arguments))
         # Instantiate every model in order to use its methods without carrying its class.
-        for inner_model_index, (inner_model_class, inner_model_arguments) in iterator:
-            inner_model = inner_model_class(is_inner_model=True, **inner_model_arguments)
+        for inner_model_index, (inner_sequence_model_class,
+                                inner_sequence_model_arguments) in enumerate(inner_sequence_models):
+            inner_model = inner_sequence_model_class(is_inner_model=True, **inner_sequence_model_arguments)
             self._inner_sequence_models.append(inner_model)
             self.inner_models_names.append(inner_model.name)
 
         return super(DeepPredictiveSequenceModel,
-                     self).build_model(input_sequence,
-                                       inner_sequence_models_arguments=inner_sequence_models_arguments,
-                                       **kwargs)
+                     self).build_model(input_sequence, inner_sequence_models=inner_sequence_models, **kwargs)
 
 
-    def build_model_evolution(self, input, inner_sequence_models_arguments, **kwargs):
+    def build_model_evolution(self, input, inner_sequence_models, **kwargs):
         current_input = input
-        iterator = enumerate(zip(self._inner_sequence_models, inner_sequence_models_arguments))
-        for inner_sequence_model_index, (inner_sequence_model, inner_sequence_model_arguments) in iterator:
-            with tf.variable_scope(inner_sequence_model.name + '_' + str(inner_sequence_model_index)):
-                current_input = inner_sequence_model.build_model_evolution(current_input,
-                                                                            **inner_sequence_model_arguments)
+        iterator = enumerate(zip(self._inner_sequence_models, inner_sequence_models))
+        for inner_sequence_model_index, (inner_sequence_model_instance, (_,inner_sequence_model_arguments)) in iterator:
+            with tf.variable_scope(inner_sequence_model_instance.name + '_' + str(inner_sequence_model_index)):
+                current_input = inner_sequence_model_instance.build_model_evolution(current_input,
+                                                                                    **inner_sequence_model_arguments)
 
         return current_input
 
 
 class PredictiveRecurrentModel(PredictiveSequenceModel):
 
-    def __init__(self, num_units, **kwargs):
-        self._num_units = num_units
-        self.initial_state = self._build_initial_state(self._num_units, **kwargs)
-        super(PredictiveSequenceModel, self).__init__(**kwargs)
+    def __init__(self, **kwargs):
+        super(PredictiveRecurrentModel, self).__init__(**kwargs)
+        self.initial_state = self._build_initial_state(**kwargs)
 
-    def _build_initial_state(self, batch_size, num_units, **kwargs):
-        return tf.zeros([batch_size, num_units])
+    def _build_initial_state(self, batch_size=1, **kwargs):
+        return tf.zeros([batch_size, self._num_units])
 
     def _build_recurrent_model(self, inputs, state, **kwargs):
         '''
@@ -723,14 +726,9 @@ class Dropout(PredictiveSequenceModel):
 
 class BasicRNN(PredictiveRecurrentModel):
 
-    def _build_recurrent_model(self, inputs, state, **kwargs):
-        current_inputs = inputs
-        if inputs.get_shape().dims[1].value != state.get_shape().dims[1].value:
-            current_inputs = linear_neurons_layer(inputs, state.get_shape().dims[1].value, 'BasicRNN')
-
+    def _build_recurrent_model(self, input, state, **kwargs):
         from rnn_cell import linear
-        hidden_state = tf.tanh(linear([current_inputs, state], self._num_units, True, scope='BasicRNN'),
-                               'BasicRNN/hidden_state')
+        hidden_state = tf.tanh(linear([input, state], self._num_units, True, scope='BasicRNN'), 'BasicRNN/hidden_state')
         return hidden_state, hidden_state
 
 
