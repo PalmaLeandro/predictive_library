@@ -65,8 +65,7 @@ def plot_confusion_matrix_heatmap(predictions, labels, classes_labels=None, show
     possible_classes_labels = np.array(classes_labels)[possible_classes_indices] if classes_labels is not None \
                               else [str(class_index) for class_index in possible_classes_indices]
 
-
-    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=labels.tolist(), y_pred=predictions),
+    confusion_matrix_df = pd.DataFrame(confusion_matrix(y_true=np.array(labels).tolist(), y_pred=predictions),
                                        columns=possible_classes_labels, index=possible_classes_labels)
 
     # Calculate percentages.
@@ -94,6 +93,7 @@ def softmax(x):
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
+
 def get_model_parameters(model_name, session):
     parameters = {}
     trainable_variables = tf.get_variable_scope().trainable_variables()
@@ -102,6 +102,7 @@ def get_model_parameters(model_name, session):
             parameters.update({variable.name: session.run(variable)})
 
     return parameters
+
 
 def variable_summaries(var, name, add_distribution=True, add_range=True, add_histogram=True):
     """Attach a lot of summaries to a Tensor."""
@@ -120,6 +121,7 @@ def variable_summaries(var, name, add_distribution=True, add_range=True, add_his
 
         if add_histogram:
             tf.summary.scalar(name, var)
+
 
 def linear_neurons_layer(inputs, num_units, scope_name):
     with tf.name_scope(scope_name):
@@ -191,7 +193,7 @@ class DistribuibleProgram(object):
 
 class PredictiveModel(DistribuibleProgram):
 
-    def __init__(self, num_features=[None],
+    def __init__(self, num_features=[None], batch_size=None, num_units=None,
                  initial_learning_rate=1., learning_rate_decay=0.95, max_epoch_decay=0,
                  cluster_machines=[get_current_machine_ip() + ':0'],
                  log_dir=None, erase_log_dir=True,
@@ -212,6 +214,7 @@ class PredictiveModel(DistribuibleProgram):
                 if model_persistence_dir is not None:
                     self.load(model_persistence_dir)
                 else:
+                    self._batch_size = batch_size
                     self._global_step = tf.Variable(0, name='global_step', trainable=False)
                     self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
                     self._update_learning_rate_op = self.build_learning_rate_update(**kwargs)
@@ -220,7 +223,8 @@ class PredictiveModel(DistribuibleProgram):
                     label = tf.placeholder(dtype=tf.int64, shape=[None], name='label')
 
                     self._do_nothing_op = tf.no_op()
-                    self._inference_op = self.build_model(inputs, num_features=num_features, **kwargs)
+                    self._inference_op = self.build_model(inputs, num_features=num_features,
+                                                          num_units=num_units, **kwargs)
                     self._infer_class_op = tf.argmax(self._inference_op, axis=1)
                     self._label_op = self.build_label(label)
                     self._loss_op = self.build_loss(self._label_op, self._inference_op, **kwargs)
@@ -228,8 +232,10 @@ class PredictiveModel(DistribuibleProgram):
                     self._init_summaries(log_dir, erase_log_dir)
 
                     # This is required so that tensorflow realizes the true amount of possible classes.
-                    self._session.run(self._train_op, {'inputs:0': [np.tile(0, [dim or 1 for dim in num_features])],
-                                                       'label:0': [self._inference_op.shape[-1].value - 1]})
+                    self._session.run(self._train_op,
+                                      {'inputs:0': np.tile(0, [batch_size or 1] + [dim or 1 for dim in num_features]),
+                                       'label:0': [self._inference_op.shape[-1].value - 1] * batch_size or 1})
+        self.output_size = num_units
 
     def _init_summaries(self, log_dir=None, erase_log_dir=True):
         if log_dir is not None:
@@ -242,12 +248,14 @@ class PredictiveModel(DistribuibleProgram):
             self._summaries_op = tf.no_op()
             self._train_summary_writer = self._validation_summary_writer = self._test_summary_writer = None
 
-    def build_model(self, inputs, **kwargs):
+    def build_model(self, inputs, name=None, **kwargs):
         '''
         Defines the model that infers an output given the provided input.
         Needs to be implemented by subclasses.
         '''
-        return tf.identity(inputs, name=self.name)
+        output = tf.identity(inputs, name=name or self.name)
+        self.output_size = tf.shape(inputs)[1:]
+        return output
 
     def build_label(self, label):
         return tf.identity(label, name='label')
@@ -270,7 +278,7 @@ class PredictiveModel(DistribuibleProgram):
 
     def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False,
                          return_batches_samples_indices=False, persist_to_path=None):
-        '''Executes an operation while logging the loss and recording the model's summaries'''
+        '''Executes an operation while logging the loss and recording the model's summaries.'''
         batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
         num_batches = len(batches_samples_indices)
 
@@ -284,8 +292,8 @@ class PredictiveModel(DistribuibleProgram):
         losses = []
         for batch_index, batch_samples in enumerate(batches_samples_indices):
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              {'inputs:0': inputs[batch_samples],
-                                                               'label:0': labels[batch_samples]})
+                                                              {'inputs:0': [inputs[sample] for sample in batch_samples],
+                                                               'label:0': [labels[sample] for sample in batch_samples]})
 
             if persist_to_path is None:
                 results.append(result)
@@ -305,60 +313,58 @@ class PredictiveModel(DistribuibleProgram):
                 summary_writer.add_summary(summaries, global_step=self._session.run(self._global_step))
                 summary_writer.flush()
 
-            epoch_completion_perc = int(float(batch_index / len(batches_samples_indices)) * 100.)
-            if epoch_completion_perc % 10 == 0:
-                logging.info('Completion: {}%'.format(epoch_completion_perc))
+            if batch_index in range(0, num_batches, math.ceil(num_batches * .1)):
+                logging.info('Completion: {}%'.format((batch_index * 100) // num_batches))
 
         logging.info('Avg. Loss: {}'.format(np.array(losses).mean()))
         return results if return_batches_samples_indices is False else (results, batches_samples_indices)
 
-
-    def train(self, dataset, num_epochs, validation_size=0.2, batch_size=20):
+    def train(self, data_set, num_epochs=1, validation_size=0.2, batch_size=None):
         import textwrap
-        for epoch in range(num_epochs):
+        for epoch in range(1, num_epochs + 1):
             if not self._session.should_stop():
                 self._session.run(self._update_learning_rate_op, feed_dict={'epoch:0':epoch})
 
                 # Calculate dataset's folds.
                 train_inputs, validation_inputs, \
-                train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
+                train_labels, validation_labels = data_set.provide_train_validation_random_partition(validation_size)
 
                 # Update model's parameters.
                 logging.info(textwrap.dedent('''
                 Training.
-                Epoch: {} .
-                Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate)))
+                Epoch: {} / {} .
+                Learning rate: {} .''').format(epoch, num_epochs, self._session.run(self._learning_rate)))
                 self.report_execution(inputs=train_inputs,
                                       labels=train_labels,
                                       operation=self._train_op,
                                       summary_writer=self._train_summary_writer,
-                                      batch_size=batch_size,
+                                      batch_size=self._batch_size or batch_size or 1,
                                       shuffle_samples=True)
 
                 # Validate new model's parameters.
                 logging.info(textwrap.dedent('''
                 Validation.
-                Epoch: {} .''').format(epoch))
+                Epoch: {} / {} .''').format(epoch, num_epochs))
                 self.report_execution(inputs=validation_inputs,
                                       labels=validation_labels,
                                       operation=self._do_nothing_op,
                                       summary_writer=self._validation_summary_writer,
-                                      batch_size=max(len(validation_labels) // 10, 10))
+                                      batch_size=max(len(validation_labels) // 10, 1))
 
                 self.save()
 
-    def test(self, dataset):
+    def test(self, data_set):
         # Test model's performance.
         logging.info('Test.')
-        classifications = self.report_execution(inputs=dataset.test_inputs,
-                                                labels=dataset.test_labels,
+        classifications = self.report_execution(inputs=data_set.test_inputs,
+                                                labels=data_set.test_labels,
                                                 operation=self._infer_class_op,
                                                 summary_writer=self._test_summary_writer,
-                                                batch_size=max(len(dataset.test_labels) // 10, 1))
+                                                batch_size=max(len(data_set.test_labels) // 10, 1))
 
         confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
-                                                            dataset.test_labels,
-                                                            dataset.label_names)
+                                                            data_set.test_labels,
+                                                            data_set.label_names)
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
     def infer(self, inputs):
@@ -444,6 +450,7 @@ class ClassificationModel(PredictiveModel):
 
 
 class IntermidiateTransformation(PredictiveModel):
+
     def train(self, samples, labels, num_epochs, validation_size):
         pass
 
@@ -453,8 +460,14 @@ class IntermidiateTransformation(PredictiveModel):
     def build_loss(self, label, **kwargs):
         pass
 
-    def build_training(self, max_gradient_norm=5.):
+    def build_training(self, **kwargs):
         return self._do_nothing_op
+
+    def build_model_evolution(self, current_step_input, **kwargs):
+        return self.build_model(current_step_input, **kwargs)
+
+    def reset(self, **kwargs):
+        pass
 
 
 class FastFourierTransform(IntermidiateTransformation):
@@ -505,6 +518,7 @@ class BatchSlice(IntermidiateTransformation):
                               [slice(start, stop, None)])
         return super(BatchSlice, self).build_model(inputs[input_slice])
 
+
 class BatchAggregation(IntermidiateTransformation):
 
     def build_model(self, inputs, aggregation, dimensions=None, **kwargs):
@@ -513,6 +527,7 @@ class BatchAggregation(IntermidiateTransformation):
             dimensions = [dimension_index for dimension_index in range(len(inputs.get_shape()))][1:]
         if aggregation == 'mean':
             return super(BatchAggregation, self).build_model(tf.reduce_mean(inputs, dimensions))
+
 
 def load_stored_parameters(parameters):
     if type(parameters) is np.ndarray:
@@ -564,7 +579,9 @@ class DeepPredictiveModel(ClassificationModel):
     '''A model that concatenates several PredictiveModels.'''
 
     def __init__(self, inner_models=None, **kwargs):
-        inner_models = [model if isinstance(model, tuple) else (model, kwargs) for model in inner_models]
+        inner_models = [(model[0], {**model[1], **kwargs}) if isinstance(model, tuple) and len(model) > 1
+                        else (model, kwargs)
+                        for model in inner_models]
         super(DeepPredictiveModel, self).__init__(inner_models=inner_models, **kwargs)
 
     def build_model(self, inputs, inner_models, **kwargs):
@@ -582,7 +599,8 @@ class DeepPredictiveModel(ClassificationModel):
 
             self.inner_models_names.append(inner_model_name)
 
-        return current_input
+        return super(DeepPredictiveModel, self).build_model(current_input,
+                                                            **{**kwargs, 'num_units': current_input_dimension})
 
     @property
     def parameters(self):
@@ -590,6 +608,7 @@ class DeepPredictiveModel(ClassificationModel):
         for inner_model_name in self.inner_models_names:
             parameters.update(get_model_parameters(inner_model_name, self._session))
         return parameters
+
 
 class TransformationPipeline(DeepPredictiveModel):
 
@@ -609,9 +628,6 @@ class TransformationPipeline(DeepPredictiveModel):
 class PredictiveSequenceModel(ClassificationModel):
     '''A model that makes inferences over a sequenced input.'''
 
-    def __init__(self, num_units, **kwargs):
-        self._num_units = num_units # Sadly this is required for Tensorflow  to iterate over arbitrary large sequences.
-
     def build_model_evolution(self, input, **kwargs):
         pass
 
@@ -621,26 +637,34 @@ class PredictiveSequenceModel(ClassificationModel):
         '''
         pass
 
-    def build_model(self, input_sequence, **kwargs):
+    def build_model(self, input_sequence, num_units, **kwargs):
         '''
         Executes the model inference over each step of the inputs, evolving the model's internal representation,
         and outputs the final representation as result.
         The input_sequence is assumed to have the following shape:
             [batch_size, num_steps, num_features].
         '''
-        self.reset(**kwargs)
+        batch_size = tf.shape(input_sequence)[0]
+        self.reset(**{**kwargs, 'batch_size': batch_size})
 
-        def condition(input_sequence, output, step):
+        def loop_condition(input_sequence, output, step):
             return tf.less(step, tf.shape(input_sequence)[1])
 
-        def body(input_sequence, output, step):
+        def loop_body(input_sequence, output, step):
             output = self.build_model_evolution(input_sequence[:, step, :], **kwargs)
             # Avoid instantiating all the reusable variables again.
             tf.get_variable_scope().reuse_variables()
             return input_sequence, output, step + 1
 
-        loop_vars = [input_sequence, tf.zeros([tf.shape(input_sequence)[0], self._num_units]), tf.constant(0)]
-        input_sequence, output, step = tf.while_loop(condition, body, loop_vars)
+        loop_variables = '''[tf.TensorArray(tf.float32, size=tf.shape(input_sequence)[0],
+                                         flow=input_sequence).write(0, input_sequence),
+                          tf.TensorArray(tf.float32, size=tf.shape(input_sequence)[0]),
+                          tf.constant(0)]'''
+
+        loop_variables = [input_sequence, tf.zeros([batch_size, self.output_size]), tf.constant(0)]
+
+        input_sequence, output, step = tf.while_loop(loop_condition, loop_body, loop_variables)
+
         return output
 
 
@@ -650,11 +674,11 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
     def reset(self, inner_sequence_models, **kwargs):
         for inner_sequence_model, (_, inner_sequence_model_arguments) in zip(self._inner_sequence_models,
                                                                              inner_sequence_models):
-            inner_sequence_model.reset(**inner_sequence_model_arguments)
+            inner_sequence_model.reset(**{**inner_sequence_model_arguments, **kwargs})
 
     def build_model(self, input_sequence, inner_sequence_models, **kwargs):
-        inner_sequence_models = [model if isinstance(model, tuple) else (model, kwargs)
-                                 for model in inner_sequence_models]
+        inner_sequence_models = [(model[0], {**model[1], **kwargs}) if isinstance(model, tuple) and len(model) > 1
+                                 else (model, kwargs) for model in inner_sequence_models]
 
         self.inner_models_names = []
         self._inner_sequence_models = []
@@ -665,12 +689,12 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
             self._inner_sequence_models.append(inner_model)
             self.inner_models_names.append(inner_model.name)
 
-        return super(DeepPredictiveSequenceModel,
-                     self).build_model(input_sequence, inner_sequence_models=inner_sequence_models, **kwargs)
+        return super(DeepPredictiveSequenceModel, self).build_model(input_sequence,
+                                                                    inner_sequence_models=inner_sequence_models,
+                                                                    **{**kwargs, 'num_units': inner_model.output_size})
 
-
-    def build_model_evolution(self, input, inner_sequence_models, **kwargs):
-        current_input = input
+    def build_model_evolution(self, current_step_input, inner_sequence_models, **kwargs):
+        current_input = current_step_input
         iterator = enumerate(zip(self._inner_sequence_models, inner_sequence_models))
         for inner_sequence_model_index, (inner_sequence_model_instance, (_,inner_sequence_model_arguments)) in iterator:
             with tf.variable_scope(inner_sequence_model_instance.name + '_' + str(inner_sequence_model_index)):
@@ -680,14 +704,22 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
         return current_input
 
 
+class LinearNN(PredictiveModel):
+
+    def build_model(self, inputs, num_units, **kwargs):
+        return super(LinearNN, self).build_model(linear_neurons_layer(inputs, num_units, self.name))
+
+
+class Dropout(IntermidiateTransformation):
+
+    def build_model(self, inputs, keep_prob, **kwargs):
+        return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
+
+
 class PredictiveRecurrentModel(PredictiveSequenceModel):
 
-    def __init__(self, **kwargs):
-        super(PredictiveRecurrentModel, self).__init__(**kwargs)
-        self.initial_state = self._build_initial_state(**kwargs)
-
-    def _build_initial_state(self, batch_size=1, **kwargs):
-        return tf.zeros([batch_size, self._num_units])
+    def _build_initial_state(self, num_units, batch_size=1, **kwargs):
+        return tf.zeros([batch_size, num_units])
 
     def _build_recurrent_model(self, inputs, state, **kwargs):
         '''
@@ -700,35 +732,14 @@ class PredictiveRecurrentModel(PredictiveSequenceModel):
         return output
 
     def reset(self, **kwargs):
-        self.state = self.initial_state
-
-
-class LinearNN(PredictiveModel):
-
-    def build_model(self, inputs, num_units, **kwargs):
-        return super(LinearNN, self).build_model(linear_neurons_layer(inputs, num_units, self.name))
-
-
-class Dropout(PredictiveSequenceModel):
-
-    def build_model(self, inputs, keep_prob, **kwargs):
-        return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
-
-    def build_training(self, **kwargs):
-        return self._do_nothing_op
-
-    def build_loss(self, label, **kwargs):
-        return self._do_nothing_op
-
-    def build_model_evolution(self, inputs, keep_prob, **kwargs):
-        return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
+        self.state = self._build_initial_state(**kwargs)
 
 
 class BasicRNN(PredictiveRecurrentModel):
 
-    def _build_recurrent_model(self, input, state, **kwargs):
+    def _build_recurrent_model(self, input, state, num_units, **kwargs):
         from rnn_cell import linear
-        hidden_state = tf.tanh(linear([input, state], self._num_units, True, scope='BasicRNN'), 'BasicRNN/hidden_state')
+        hidden_state = tf.tanh(linear([input, state], num_units, True, scope='BasicRNN'), 'BasicRNN/hidden_state')
         return hidden_state, hidden_state
 
 
@@ -772,7 +783,7 @@ class DataSet(object):
 
 
 def dataset_class_distribution(labels, labels_names=None, show_table=True, plot_chart=True, ax=None, **kwargs):
-    classes_histogram = np.unique(labels.tolist(), return_counts=True)
+    classes_histogram = np.unique(np.array(labels).tolist(), return_counts=True)
     if not show_table and not plot_chart:
         return classes_histogram
     import pandas as pd
@@ -821,11 +832,57 @@ def build_samples_indices_batches(num_samples, batch_size=1, shuffle_samples=Fal
         return samples_indices_batches + [samples_indices[num_batches * batch_size:]] # Batches' leftover.
 
 
+def divide_set_randomly(elements, shutter_proportion, exact=False):
+    if exact:
+        return train_test_split(elements, test_size=shutter_proportion)
+    else:
+        # Here we go.
+        import random
+
+        A_fold_indices = random.sample(range(len(elements)), k=int(round(len(elements) * (1 - shutter_proportion))))
+        # TODO: optimize this.
+        A_fold = []
+        B_fold = []
+
+        for element_index, element in enumerate(elements):
+            if element_index in A_fold_indices:
+                A_fold.append(element)
+            else:
+                B_fold.append(element)
+
+        return A_fold, B_fold
+
+
+def unify_inputs_labels_samples(inputs, labels):
+    # TODO: optimize this.
+    return [sample for sample in zip(inputs, labels)]
+
+
+def separate_samples_input_labels(samples):
+    # TODO: optimize this.
+    inputs = []
+    labels = []
+    for sample in samples:
+        inputs.append(sample[0])
+        labels.append(sample[1])
+
+    return inputs, labels
+
+
+def divide_inputs_labels_set_randomly(inputs, labels, shutter_proportion, exact=False):
+    A_set, B_set = divide_set_randomly(unify_inputs_labels_samples(inputs, labels), shutter_proportion, exact)
+    A_set_inputs, A_set_labels = separate_samples_input_labels(A_set)
+    B_set_inputs, B_set_labels = separate_samples_input_labels(B_set)
+    return A_set_inputs, B_set_inputs, A_set_labels, B_set_labels
+
+
 class ArrayDataSet(DataSet):
 
-    def __init__(self, inputs, labels=np.array([]),
-                 test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
+    def __init__(self, inputs, labels=np.array([]), test_proportion=None, validation_proportion=None, labels_names=None,
+                 exact_set_division=True, **kwargs):
         self.labels_names = labels_names
+        self.exact_set_division = exact_set_division
+        self.validation_proportion = validation_proportion
         if test_proportion is None:
             self._train_inputs, self._train_labels = inputs, labels
             self._test_inputs, self._test_labels = inputs, labels
@@ -833,8 +890,7 @@ class ArrayDataSet(DataSet):
             self._train_inputs, \
             self._test_inputs, \
             self._train_labels, \
-            self._test_labels = train_test_split(inputs, labels, test_size=test_proportion)
-            self.validation_proportion = validation_proportion
+            self._test_labels = divide_inputs_labels_set_randomly(inputs, labels, test_proportion, exact_set_division)
 
     @property
     def label_names(self):
@@ -858,7 +914,7 @@ class ArrayDataSet(DataSet):
     @property
     def num_classes(self):
         # Consider labels as indices being counted from zero.
-        return self._train_labels.max() + 1
+        return np.array(self._train_labels).max() + 1
 
     @property
     def num_features(self):
@@ -866,10 +922,10 @@ class ArrayDataSet(DataSet):
         # If the sample is a sequence then return the length of the first step.
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
-    def provide_train_validation_random_partition(self, validation_proportion=None):
-        return train_test_split(self._train_inputs, self._train_labels,
-                                test_size=validation_proportion or self.validation_proportion)
-
+    def provide_train_validation_random_partition(self, validation_proportion=None, exact_set_division=None):
+        return divide_inputs_labels_set_randomly(self._train_inputs, self._train_labels,
+                                                 validation_proportion or self.validation_proportion,
+                                                 exact_set_division or self.exact_set_division)
 
     @property
     def train_inputs(self):
@@ -954,29 +1010,37 @@ class ArrayDataSet(DataSet):
                                                                                         columns='dataset')
 
 
-class CSVDataSet(ArrayDataSet):
+class DataFrameDataSet(ArrayDataSet):
 
-    def __init__(self, path, sample_field=None, step_field=None, label_field=None,
+    def __init__(self, dataset_df, sample_field=None, step_field=None, label_field=None,
                  test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
-        import pandas as pd
-        dataset_df = pd.read_csv(path, **kwargs)
 
         if sample_field is not None and sample_field in dataset_df.columns and \
            label_field is not None and label_field in dataset_df.columns:
             num_samples = dataset_df[sample_field].nunique()
 
             labels = dataset_df[[sample_field,
-                                 label_field]].drop_duplicates().set_index(sample_field)[label_field].as_matrix()
+                                 label_field]].drop_duplicates().set_index(sample_field)[label_field].values
 
-            if step_field is not None and step_field in dataset_df.columns:
+            if step_field is not None and step_field in dataset_df.columns.tolist():
                 # Treatment for sequential datasets.
-                self.steps_per_sample = dataset_df[step_field].nunique()
-                num_features = len([column for column in dataset_df.columns if column not in [sample_field,
-                                                                                              step_field,
-                                                                                              label_field]])
+                sequence_length_is_constant = (dataset_df[step_field].value_counts().tolist()[-1] ==
+                                               dataset_df[step_field].nunique())
+                if sequence_length_is_constant:
+                    self.steps_per_sample = dataset_df[step_field].nunique()
+                    num_features = len([column for column in dataset_df.columns if column not in [sample_field,
+                                                                                                  step_field,
+                                                                                                  label_field]])
 
-                inputs = dataset_df.drop(label_field, axis=1).set_index([sample_field, step_field]).as_matrix()\
-                            .reshape([num_samples, self.steps_per_sample, num_features])
+                    inputs = dataset_df.drop(label_field, axis=1).set_index([sample_field, step_field]).as_matrix()\
+                                .reshape([num_samples, self.steps_per_sample, num_features])
+                else:
+                    self.steps_per_sample = None
+                    inputs = np.array([sample_sequence_df[[column
+                                                           for column in sample_sequence_df.columns.tolist()
+                                                           if not column in [sample_field, label_field]]].values
+                                       for (sample, label), sample_sequence_df
+                                       in dataset_df.groupby([sample_field, label_field])])
             else:
                 self.steps_per_sample = None
                 inputs = dataset_df.drop(label_field, axis=1).set_index(sample_field).as_matrix()
@@ -990,9 +1054,18 @@ class CSVDataSet(ArrayDataSet):
                 inputs = dataset_df.as_matrix()
                 labels = np.array([])
 
-        super(CSVDataSet, self).__init__(inputs, labels,
-                                         test_proportion=test_proportion, validation_proportion=validation_proportion,
-                                         labels_names=labels_names, **kwargs)
+        super(DataFrameDataSet, self).__init__(inputs, labels,
+                                               test_proportion=test_proportion,
+                                               validation_proportion=validation_proportion,
+                                               labels_names=labels_names, **kwargs)
+
+
+class CSVDataSet(DataFrameDataSet):
+
+    def __init__(self, path_or_buffer, **kwargs):
+        import pandas as pd
+        super(CSVDataSet, self).__init__(pd.read_csv(path_or_buffer, **kwargs), **kwargs)
+
 
 def list_folder_files_with_extension(folder_path, extension):
     import glob
@@ -1133,45 +1206,33 @@ class SequentialDataMerge(SequentialData):
         if self.exact_merge:
             return super(SequentialDataMerge, self).provide_train_validation_random_partition(validation_proportion)
         else:
-            # Here we go.
-            import random
-
             train_sequence_sets = self.data_sequences_sets[:self.num_train_sequence_sets]
-            number_of_sequence_sets_on_train_fold = int(round(len(train_sequence_sets) * (1 - validation_proportion)))
 
-            train_sequence_sets_indices_fold = random.sample(range(len(train_sequence_sets)),
-                                                             k=number_of_sequence_sets_on_train_fold)
-            train_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
-                                        for data_sequence_set_index in train_sequence_sets_indices_fold]
+            train_fold, validation_fold = divide_set_randomly(train_sequence_sets, validation_proportion)
 
-            validation_sequence_sets_indices_fold = list(set(range(self.num_train_sequence_sets)) - \
-                                                         set(train_sequence_sets_indices_fold))
-            validation_sequence_sets_fold = [train_sequence_sets[data_sequence_set_index]
-                                             for data_sequence_set_index in validation_sequence_sets_indices_fold]
-
-            fold_train_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
-                                                    for data_sequence_set in train_sequence_sets_fold],
+            train_fold_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
+                                                    for data_sequence_set in train_fold],
                                                     test_proportion=0, validation_proportion=0,
                                                     labels_names=self.labels_names, exact_merge=False,
                                                     inputs_key=self.inputs_key, labels_key=self.labels_key)
-            fold_train_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
-                                                     for data_sequence_set in train_sequence_sets_fold],
+            train_fold_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
+                                                     for data_sequence_set in train_fold],
                                                     test_proportion=1, validation_proportion=0,
                                                     labels_names=self.labels_names, exact_merge=False,
                                                     inputs_key=self.inputs_key, labels_key=self.labels_key)
 
-            fold_validation_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
-                                                          for data_sequence_set in validation_sequence_sets_fold],
+            validation_fold_inputs = SequentialDataMerge([data_sequence_set[:, self.inputs_key]
+                                                          for data_sequence_set in validation_fold],
                                                          test_proportion=0, validation_proportion=1,
                                                          labels_names=self.labels_names, exact_merge=False,
                                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
-            fold_validation_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
-                                                          for data_sequence_set in validation_sequence_sets_fold],
+            validation_fold_labels = SequentialDataMerge([data_sequence_set[:, self.labels_key]
+                                                          for data_sequence_set in validation_fold],
                                                          test_proportion=1, validation_proportion=1,
                                                          labels_names=self.labels_names, exact_merge=False,
                                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
 
-            return fold_train_inputs, fold_validation_inputs, fold_train_labels, fold_validation_labels
+            return train_fold_inputs, validation_fold_inputs, train_fold_labels, validation_fold_labels
 
     @property
     def num_samples(self):
