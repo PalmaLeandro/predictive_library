@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 
 from sklearn.model_selection import train_test_split
+from tensorflow.python.ops import array_ops
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -741,6 +742,29 @@ class BasicRNN(PredictiveRecurrentModel):
         from rnn_cell import linear
         hidden_state = tf.tanh(linear([input, state], num_units, True, scope='BasicRNN'), 'BasicRNN/hidden_state')
         return hidden_state, hidden_state
+
+
+class LSTMCell(PredictiveRecurrentModel):
+
+    def _build_initial_state(self, num_units, batch_size=1, **kwargs):
+        return super()._build_initial_state(num_units * 2, batch_size, **kwargs)
+
+    def _build_recurrent_model(self, input, state, num_units, **kwargs):
+        from rnn_cell import linear
+        c, h = array_ops.split(state, 2, 1)
+        c = tf.identity(c, name='LSTMCell/c_state')
+        h = tf.identity(c, name='LSTMCell/h_state')
+
+        i, j, f, o = array_ops.split(linear([input, h], 4 * num_units, True), 4, 1)
+
+        j = tf.tanh(j, name='LSTMCell/j_input')
+        i = tf.sigmoid(i, name='LSTMCell/i_gate')
+        f = tf.sigmoid(f, name='LSTMCell/f_gate')
+        o = tf.sigmoid(o, name='LSTMCell/o_gate')
+        c_ = i * j + f * c
+        h_ = o * tf.tanh(c_)
+
+        return h_, array_ops.concat([c_, h_], 1, name='LSTMCell/c_h_states')
 
 
 class IterativeNN(ClassificationModel):
