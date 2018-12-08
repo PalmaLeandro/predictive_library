@@ -8,6 +8,7 @@ from tensorflow.python.ops import array_ops
 
 logging.getLogger().setLevel(logging.INFO)
 
+
 def init_dir(dir_path, erase_dir=True):
     if tf.gfile.Exists(dir_path) and erase_dir is True:
         tf.gfile.DeleteRecursively(dir_path)
@@ -28,6 +29,7 @@ def plot_dataset(inputs, labels=None, ax=None):
 
     if ax_arg is None:
         plt.show()
+
 
 def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=[-3., 3.]):
     import matplotlib.pyplot as plt
@@ -150,7 +152,83 @@ def log10(x):
   denominator = tf.log(tf.constant(10, dtype=numerator.dtype))
   return numerator / denominator
 
+
 next_2_base = lambda x: 2 ** (int(np.log2(x)) + 1)
+
+
+def plot_hyperplanes(parameters, limits, ax_arg, ax):
+    hyperplanes_names = np.unique([name.split('/')[0] for name in parameters.keys()]).tolist()
+    hyperplanes_weights = [variable_value
+                           for variable_name, variable_value
+                           in parameters.items()
+                           if 'weights' in variable_name]
+    hyperplanes_biases = [variable_value
+                          for variable_name, variable_value
+                          in parameters.items()
+                          if 'bias' in variable_name]
+    # Assume that the bias and the weights are created at the same time. That's why makes sense the zip.
+    for (hyperplanes_names, hyperplanes_weights, hyperplanes_bias) in zip(hyperplanes_names,
+                                                                          hyperplanes_weights,
+                                                                          hyperplanes_biases):
+        for hyperplane_index, \
+            (hyperplane_weights, hyperplane_bias) in enumerate(zip(hyperplanes_weights.transpose(),
+                                                                   hyperplanes_bias)):
+            plot_hyperplane(weights=hyperplane_weights,
+                            bias=hyperplane_bias,
+                            label=hyperplanes_names + '_hyperplane_' + str(hyperplane_index),
+                            ax=ax,
+                            limits=limits)
+    if ax_arg is None:
+        import matplotlib.pyplot as plt
+        plt.show()
+
+
+def plot_learning(parameters, inputs=None, labels=None, ax_arg=None, limits=[-5., 5.]):
+    import matplotlib.pyplot as plt
+    ax = ax_arg or plt.subplots(figsize=(10, 10))[1]
+    if inputs is not None:
+        plot_dataset(inputs=inputs, labels=labels, ax=ax)
+
+    plot_hyperplanes(parameters, limits, ax_arg, ax)
+
+
+def strip_consts(graph_def, max_const_size=32):
+    """Strip large constant values from graph_def."""
+    strip_def = tf.GraphDef()
+    for n0 in graph_def.node:
+        n = strip_def.node.add()
+        n.MergeFrom(n0)
+        if n.op == 'Const':
+            tensor = n.attr['value'].tensor
+            size = len(tensor.tensor_content)
+            if size > max_const_size:
+                tensor.tensor_content = "<stripped %d bytes>"%size
+    return strip_def
+
+
+def show_graph(graph_def, max_const_size=32):
+    """Visualize TensorFlow graph."""
+    from IPython.display import display, HTML
+    if hasattr(graph_def, 'as_graph_def'):
+        graph_def = graph_def.as_graph_def()
+    strip_def = strip_consts(graph_def, max_const_size=max_const_size)
+    code = """
+        <script>
+          function load() {{
+            document.getElementById("{id}").pbtxt = {data};
+          }}
+        </script>
+        <link rel="import" href="https://tensorboard.appspot.com/tf-graph-basic.build.html" onload=load()>
+        <div style="height:600px">
+          <tf-graph-basic id="{id}"></tf-graph-basic>
+        </div>
+    """.format(data=repr(str(strip_def)), id='graph'+str(np.random.rand()))
+
+    iframe = """
+        <iframe seamless style="width:1200px;height:620px;border:0" srcdoc="{}"></iframe>
+    """.format(code.replace('"', '&quot;'))
+    display(HTML(iframe))
+
 
 class DistribuibleProgram(object):
     '''An object capable of executing a TensorFlow graph distributed over several machines.'''
@@ -195,17 +273,11 @@ class DistribuibleProgram(object):
 class PredictiveModel(DistribuibleProgram):
 
     def __init__(self, num_features=[None], batch_size=None, num_units=None,
-                 initial_learning_rate=1., learning_rate_decay=0.95, max_epoch_decay=0,
                  cluster_machines=[get_current_machine_ip() + ':0'],
-                 log_dir=None, erase_log_dir=True,
                  model_persistence_dir=None, erase_model_persistence_dir=True,
-                 is_inner_model=False,
-                 **kwargs):
+                 is_inner_model=False, **kwargs):
         if not is_inner_model:
-            super(PredictiveModel, self).__init__(cluster_machines)
-            self._initial_learning_rate = initial_learning_rate
-            self._learning_rate_decay = learning_rate_decay
-            self._max_epoch_decay = max_epoch_decay
+            super().__init__(cluster_machines)
             self._model_persistence_dir = model_persistence_dir
             self._erase_model_persistence_dir = erase_model_persistence_dir
 
@@ -217,68 +289,42 @@ class PredictiveModel(DistribuibleProgram):
                 else:
                     self._batch_size = batch_size
                     self._global_step = tf.Variable(0, name='global_step', trainable=False)
-                    self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
-                    self._update_learning_rate_op = self.build_learning_rate_update(**kwargs)
 
                     inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
-                    label = tf.placeholder(dtype=tf.int64, shape=[None], name='label')
+                    label = tf.placeholder(dtype=tf.float32, shape=[None], name='label')
 
                     self._do_nothing_op = tf.no_op()
-                    self._inference_op = self.build_model(inputs, num_features=num_features,
-                                                          num_units=num_units, **kwargs)
-                    self._infer_class_op = tf.argmax(self._inference_op, axis=1)
-                    self._label_op = self.build_label(label)
-                    self._loss_op = self.build_loss(self._label_op, self._inference_op, **kwargs)
-                    self._train_op = self.build_training()
-                    self._init_summaries(log_dir, erase_log_dir)
+                    self._model_output_op = self.build_model(inputs, num_features=num_features, num_units=num_units,
+                                                             **kwargs)
+                    self._inference_op = self.build_inference(self._model_output_op, **kwargs)
+                    self._label_op = self.build_label(label, **kwargs)
+                    self._loss_op = self.build_loss(self._label_op, self._model_output_op, **kwargs)
 
-                    # This is required so that tensorflow realizes the true amount of possible classes.
-                    self._session.run(self._train_op,
-                                      {'inputs:0': np.tile(0, [batch_size or 1] + [dim or 1 for dim in num_features]),
-                                       'label:0': [self._inference_op.shape[-1].value - 1] * batch_size or 1})
         self.output_size = num_units
-
-    def _init_summaries(self, log_dir=None, erase_log_dir=True):
-        if log_dir is not None:
-            self._summaries_op = tf.summary.merge_all()
-            init_dir(log_dir, erase_log_dir)
-            self._train_summary_writer = tf.summary.FileWriter(log_dir + '/train', self._session.graph)
-            self._validation_summary_writer = tf.summary.FileWriter(log_dir + '/validation', self._session.graph)
-            self._test_summary_writer = tf.summary.FileWriter(log_dir + '/test', self._session.graph)
-        else:
-            self._summaries_op = tf.no_op()
-            self._train_summary_writer = self._validation_summary_writer = self._test_summary_writer = None
 
     def build_model(self, inputs, name=None, **kwargs):
         '''
-        Defines the model that infers an output given the provided input.
+        Defines the model output to be used to infer a prediction, given the provided input.
         Needs to be implemented by subclasses.
         '''
-        output = tf.identity(inputs, name=name or self.name)
+        output = tf.identity(inputs, name=name or (self.name + '_inference'))
         self.output_size = tf.shape(inputs)[1:]
         return output
 
-    def build_label(self, label):
+    def build_inference(self, model_output, name=None, **kwargs):
+        '''
+        Defines the usage of the output of the model to produce a prediction, given the provided input.
+        '''
+        return tf.identity(model_output, name=name or self.name)
+
+    def build_label(self, label, **kwargs):
         return tf.identity(label, name='label')
 
     def build_loss(self, label, prediction, **kwargs):
         return tf.reduce_mean(tf.squared_difference(label, prediction, name='squared_error'), name='mean_squared_error')
 
-    def build_training(self, max_gradient_norm=5.):
-        '''Defines Gradient Descent with clipped norms as default training method.'''
-        tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(self._loss_op, tvars), max_gradient_norm)
-        optimizer = tf.train.GradientDescentOptimizer(self._learning_rate)
-        return optimizer.apply_gradients(zip(grads, tvars))
-
-    def build_learning_rate_update(self, **kwargs):
-        epoch = tf.placeholder(dtype=tf.int32, name='epoch')
-        current_learning_rate_decay = self._learning_rate_decay ** \
-                                      tf.maximum(tf.cast(epoch, tf.float32) - self._max_epoch_decay, 0.)
-        return tf.assign(self._learning_rate, self._initial_learning_rate * current_learning_rate_decay)
-
     def report_execution(self, inputs, labels, operation, summary_writer=None, batch_size=1, shuffle_samples=False,
-                         return_batches_samples_indices=False, persist_to_path=None):
+                         return_batches_samples_indices=False, persist_to_path=None, **op_args):
         '''Executes an operation while logging the loss and recording the model's summaries.'''
         batches_samples_indices = build_samples_indices_batches(len(inputs), batch_size, shuffle_samples)
         num_batches = len(batches_samples_indices)
@@ -292,9 +338,11 @@ class PredictiveModel(DistribuibleProgram):
                                 shape=expected_results_shape)
         losses = []
         for batch_index, batch_samples in enumerate(batches_samples_indices):
+            graph_args = {**{key + ':0': value for key, value in op_args.items()},
+                          **{'inputs:0': [inputs[sample] for sample in batch_samples],
+                             'label:0': [labels[sample] for sample in batch_samples]}}
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              {'inputs:0': [inputs[sample] for sample in batch_samples],
-                                                               'label:0': [labels[sample] for sample in batch_samples]})
+                                                              feed_dict=graph_args)
 
             if persist_to_path is None:
                 results.append(result)
@@ -320,53 +368,12 @@ class PredictiveModel(DistribuibleProgram):
         logging.info('Avg. Loss: {}'.format(np.array(losses).mean()))
         return results if return_batches_samples_indices is False else (results, batches_samples_indices)
 
-    def train(self, data_set, num_epochs=1, validation_size=0.2, batch_size=None):
-        import textwrap
-        for epoch in range(1, num_epochs + 1):
-            if not self._session.should_stop():
-                self._session.run(self._update_learning_rate_op, feed_dict={'epoch:0':epoch})
-
-                # Calculate dataset's folds.
-                train_inputs, validation_inputs, \
-                train_labels, validation_labels = data_set.provide_train_validation_random_partition(validation_size)
-
-                # Update model's parameters.
-                logging.info(textwrap.dedent('''
-                Training.
-                Epoch: {} / {} .
-                Learning rate: {} .''').format(epoch, num_epochs, self._session.run(self._learning_rate)))
-                self.report_execution(inputs=train_inputs,
-                                      labels=train_labels,
-                                      operation=self._train_op,
-                                      summary_writer=self._train_summary_writer,
-                                      batch_size=self._batch_size or batch_size or 1,
-                                      shuffle_samples=True)
-
-                # Validate new model's parameters.
-                logging.info(textwrap.dedent('''
-                Validation.
-                Epoch: {} / {} .''').format(epoch, num_epochs))
-                self.report_execution(inputs=validation_inputs,
-                                      labels=validation_labels,
-                                      operation=self._do_nothing_op,
-                                      summary_writer=self._validation_summary_writer,
-                                      batch_size=max(len(validation_labels) // 10, 1))
-
-                self.save()
-
     def test(self, data_set):
         # Test model's performance.
         logging.info('Test.')
-        classifications = self.report_execution(inputs=data_set.test_inputs,
-                                                labels=data_set.test_labels,
-                                                operation=self._infer_class_op,
-                                                summary_writer=self._test_summary_writer,
-                                                batch_size=max(len(data_set.test_labels) // 10, 1))
-
-        confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
-                                                            data_set.test_labels,
-                                                            data_set.label_names)
-        return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
+        return self.report_execution(inputs=data_set.test_inputs, labels=data_set.test_labels,
+                                     operation=self._inference_op, summary_writer=self._test_summary_writer,
+                                     batch_size=max(len(data_set.test_labels) // 10, 1))
 
     def infer(self, inputs):
         if self._task_index == 0:
@@ -399,84 +406,110 @@ class PredictiveModel(DistribuibleProgram):
                                                  checkpoint_dir=self._model_persistence_dir,
                                                  config=self._cluster_config)
 
+    def reset(self, **kwargs):
+        '''Reset whatever kind of state the model may have during the prediction if it is done over a sequence.'''
+        pass
+
+    def build_model_evolution(self, inputs, **kwargs):
+        return self.build_model(inputs, **kwargs)
+
+
+class TrainableModel(PredictiveModel):
+
+    def __init__(self, initial_learning_rate=1., is_inner_model=False, **kwargs):
+        super().__init__(is_inner_model=is_inner_model, **kwargs)
+        if not is_inner_model:
+            self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
+            self._update_learning_rate_op = self.build_learning_rate_update(initial_learning_rate=initial_learning_rate,
+                                                                            **kwargs)
+            self._train_op = self.build_training(self._loss_op, **kwargs)
+            self.init_summaries(**kwargs)
+
+    def build_training(self, loss, max_gradient_norm=5., **kwargs):
+        '''Defines Gradient Descent with clipped norms as default training method.'''
+        tvars = tf.trainable_variables()
+        grads, _ = tf.clip_by_global_norm(tf.gradients(loss, tvars), max_gradient_norm)
+        optimizer = tf.train.GradientDescentOptimizer(self._learning_rate)
+        return optimizer.apply_gradients(zip(grads, tvars))
+
+    def build_learning_rate_update(self, initial_learning_rate=1., learning_rate_decay=.9, max_epoch_decay=1, **kwargs):
+        epoch = tf.placeholder(shape=(), dtype=tf.float32, name='epoch')
+        current_learning_rate_decay = learning_rate_decay ** tf.maximum(epoch - max_epoch_decay, 0.)
+        self._learning_rate = tf.assign(self._learning_rate, initial_learning_rate * current_learning_rate_decay)
+        return self._learning_rate
+
+    def init_summaries(self, log_dir=None, erase_log_dir=False, **kwargs):
+        if log_dir is not None:
+            self._summaries_op = tf.summary.merge_all()
+            init_dir(log_dir, erase_log_dir)
+            self._train_summary_writer = tf.summary.FileWriter(log_dir + '/train', self._session.graph)
+            self._validation_summary_writer = tf.summary.FileWriter(log_dir + '/validation', self._session.graph)
+            self._test_summary_writer = tf.summary.FileWriter(log_dir + '/test', self._session.graph)
+        else:
+            self._summaries_op = tf.no_op()
+            self._train_summary_writer = self._validation_summary_writer = self._test_summary_writer = None
+
+    def train(self, dataset, num_epochs, validation_size=0.2, batch_size=20):
+        import textwrap
+        for epoch in range(num_epochs):
+            if not self._session.should_stop():
+
+                # Calculate dataset's folds.
+                train_inputs, validation_inputs, \
+                train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
+
+                # Update model's parameters.
+                logging.info(textwrap.dedent('''
+                Training.
+                Epoch: {} .
+                Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate, {'epoch:0':epoch})))
+                self.report_execution(inputs=train_inputs,
+                                      labels=train_labels,
+                                      operation=self._train_op,
+                                      summary_writer=self._train_summary_writer,
+                                      batch_size=batch_size,
+                                      shuffle_samples=True,
+                                      epoch=epoch)
+
+                # Validate new model's parameters.
+                logging.info(textwrap.dedent('''
+                Validation.
+                Epoch: {} .''').format(epoch))
+                self.report_execution(inputs=validation_inputs,
+                                      labels=validation_labels,
+                                      operation=self._do_nothing_op,
+                                      summary_writer=self._validation_summary_writer,
+                                      batch_size=max(len(validation_labels) // 10, 10))
+
+                self.save()
+
     @property
     def parameters(self):
         return get_model_parameters(self.name, self._session)
 
-    def plot_parameters(self, inputs=None, labels=None, ax_arg=None, limits=[-5., 5.]):
-        import matplotlib.pyplot as plt
-        ax = ax_arg or plt.subplots(figsize=(10, 10))[1]
-        if inputs is not None:
-            plot_dataset(inputs=inputs, labels=labels, ax=ax)
-        parameters = self.parameters
 
-        hyperplanes_names = np.unique([name.split('/')[0] for name in parameters.keys()]).tolist()
-        hyperplanes_weights = [variable_value
-                               for variable_name, variable_value
-                               in parameters.items()
-                               if 'weights' in variable_name]
+class ClassificationModel(TrainableModel):
 
-        hyperplanes_biases = [variable_value
-                              for variable_name, variable_value
-                              in parameters.items()
-                              if 'bias' in variable_name]
+    def build_inference(self, model_output, name=None, **kwargs):
+        return super().build_inference(tf.argmax(tf.nn.softmax(model_output), axis=1), name='prediction', **kwargs)
 
-        # Assume that the bias and the weights are created at the same time. That's why makes sense the zip.
-        for (hyperplanes_names, hyperplanes_weights, hyperplanes_bias) in zip(hyperplanes_names,
-                                                                              hyperplanes_weights,
-                                                                              hyperplanes_biases):
-            for hyperplane_index, \
-                (hyperplane_weights, hyperplane_bias) in enumerate(zip(hyperplanes_weights.transpose(),
-                                                                       hyperplanes_bias)):
-                plot_hyperplane(weights=hyperplane_weights,
-                                bias=hyperplane_bias,
-                                label=hyperplanes_names + '_hyperplane_' + str(hyperplane_index),
-                                ax=ax,
-                                limits=limits)
+    def build_label(self, label, num_classes, **kwargs):
+        return super(ClassificationModel, self).build_label(tf.one_hot(tf.cast(label, tf.int64), num_classes))
 
-        if ax_arg is None:
-            plt.show()
+    def test(self, data_set):
+        classifications = super().test(data_set)
+        confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
+                                                            data_set.test_labels,
+                                                            data_set.label_names)
+        return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
 
-class ClassificationModel(PredictiveModel):
-
-    def build_label(self, label):
-        return super(ClassificationModel, self).build_label(label)
-
-    def build_loss(self, label, prediction, **kwargs):
-        return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
-                                                                             labels=label,
-                                                                             name='cross_entropy'),
-                              name='cross_entropy_mean')
-
-
-class IntermidiateTransformation(PredictiveModel):
-
-    def train(self, samples, labels, num_epochs, validation_size):
-        pass
-
-    def test(self, inputs, labels, classes_labels=None):
-        pass
-
-    def build_loss(self, label, **kwargs):
-        pass
-
-    def build_training(self, **kwargs):
-        return self._do_nothing_op
-
-    def build_model_evolution(self, current_step_input, **kwargs):
-        return self.build_model(current_step_input, **kwargs)
-
-    def reset(self, **kwargs):
-        pass
-
-
-class FastFourierTransform(IntermidiateTransformation):
+class FastFourierTransform(PredictiveModel):
 
     def build_model(self, inputs, frame_length, frame_step=None, **kwargs):
         frame_step = frame_step if frame_step is not None else frame_length
         stfts = tf.contrib.signal.stft(inputs, frame_length=frame_length, frame_step=frame_step, pad_end=True)
-        return super(FastFourierTransform, self).build_model(stfts)
+        return super().build_model(stfts)
 
 
 class PowerDensityEstimation(FastFourierTransform):
@@ -494,40 +527,40 @@ class LogMagnitudeSpectrogram(FastFourierTransform):
         return super(FastFourierTransform, self).build_model(log_magnitude_spectrograms)
 
 
-class InputTranspose(IntermidiateTransformation):
+class InputTranspose(PredictiveModel):
 
     def build_model(self, inputs, dimension_placement, **kwargs):
-        return super(InputTranspose, self).build_model(tf.transpose(inputs, dimension_placement))
+        return super().build_model(tf.transpose(inputs, dimension_placement))
 
 
-class InputReshape(IntermidiateTransformation):
+class InputReshape(PredictiveModel):
 
     def build_model(self, inputs, new_shape, **kwargs):
-        return super(InputReshape, self).build_model(tf.reshape(inputs, new_shape))
+        return super().build_model(tf.reshape(inputs, new_shape))
 
 
-class BatchReshape(IntermidiateTransformation):
+class BatchReshape(PredictiveModel):
 
     def build_model(self, inputs, new_shape=[-1], **kwargs):
-        return super(BatchReshape, self).build_model(tf.reshape(inputs, [-1, *new_shape]))
+        return super().build_model(tf.reshape(inputs, [-1, *new_shape]))
 
 
-class BatchSlice(IntermidiateTransformation):
+class BatchSlice(PredictiveModel):
 
     def build_model(self, inputs, start=None, stop=None, **kwargs):
         input_slice = tuple(np.repeat(slice(None, None, None), len(inputs.get_shape()) - 1).tolist() +
                               [slice(start, stop, None)])
-        return super(BatchSlice, self).build_model(inputs[input_slice])
+        return super().build_model(inputs[input_slice])
 
 
-class BatchAggregation(IntermidiateTransformation):
+class BatchAggregation(PredictiveModel):
 
     def build_model(self, inputs, aggregation, dimensions=None, **kwargs):
         if dimensions is None:
             # not_batch_dimensions_indexes:
             dimensions = [dimension_index for dimension_index in range(len(inputs.get_shape()))][1:]
         if aggregation == 'mean':
-            return super(BatchAggregation, self).build_model(tf.reduce_mean(inputs, dimensions))
+            return super().build_model(tf.reduce_mean(inputs, dimensions))
 
 
 def load_stored_parameters(parameters):
@@ -540,20 +573,19 @@ def load_stored_parameters(parameters):
     raise NotImplementedError()
 
 
-class HyperplaneProjection(IntermidiateTransformation):
+class HyperplaneProjection(PredictiveModel):
 
     def __init__(self, normal, bias=None, **kwargs):
         self.normal = tf.constant(load_stored_parameters(normal))
         self.bias = tf.constant(load_stored_parameters(bias)) if bias is not None \
             else tf.zeros(self.normal.get_shape().dims[0].value)
-        super(HyperplaneProjection, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def build_model(self, inputs, **kwargs):
-        return super(HyperplaneProjection, self).build_model(tf.matmul(inputs, tf.transpose(self.normal)) + self.bias,
-                                                             **kwargs)
+        return super().build_model(tf.matmul(inputs, tf.transpose(self.normal)) + self.bias, **kwargs)
 
 
-class ScikitLearnEstimatorTransform(IntermidiateTransformation):
+class ScikitLearnEstimatorTransform(PredictiveModel):
 
     def __init__(self, estimator, **kwargs):
         from sklearn.externals import joblib
@@ -564,26 +596,26 @@ class ScikitLearnEstimatorTransform(IntermidiateTransformation):
         return super(ScikitLearnEstimatorTransform, self).build_model(self.estimator.transform(inputs), **kwargs)
 
 
-class SigmoidActivation(IntermidiateTransformation):
+class SigmoidActivation(PredictiveModel):
 
     def build_model(self, inputs, **kwargs):
         return super(SigmoidActivation, self).build_model(tf.nn.sigmoid(inputs))
 
 
-class SoftmaxActivation(IntermidiateTransformation):
+class SoftmaxActivation(PredictiveModel):
 
     def build_model(self, inputs, **kwargs):
-        return super(SoftmaxActivation, self).build_model(tf.nn.softmax(inputs))
+        return super().build_model(tf.nn.softmax(inputs))
 
 
 class DeepPredictiveModel(ClassificationModel):
     '''A model that concatenates several PredictiveModels.'''
 
     def __init__(self, inner_models=None, **kwargs):
-        inner_models = [(model[0], {**model[1], **kwargs}) if isinstance(model, tuple) and len(model) > 1
+        inner_models = [(model[0], {**kwargs, **model[1]}) if isinstance(model, tuple) and len(model) > 1
                         else (model, kwargs)
                         for model in inner_models]
-        super(DeepPredictiveModel, self).__init__(inner_models=inner_models, **kwargs)
+        super().__init__(inner_models=inner_models, **kwargs)
 
     def build_model(self, inputs, inner_models, **kwargs):
         current_input = inputs
@@ -600,8 +632,7 @@ class DeepPredictiveModel(ClassificationModel):
 
             self.inner_models_names.append(inner_model_name)
 
-        return super(DeepPredictiveModel, self).build_model(current_input,
-                                                            **{**kwargs, 'num_units': current_input_dimension})
+        return super().build_model(current_input, **{**kwargs, 'num_units': current_input_dimension})
 
     @property
     def parameters(self):
@@ -613,15 +644,6 @@ class DeepPredictiveModel(ClassificationModel):
 
 class TransformationPipeline(DeepPredictiveModel):
 
-    def train(self, samples, labels, num_epochs, validation_size):
-        pass
-
-    def test(self, inputs, labels, classes_labels=None):
-        pass
-
-    def build_training(self, max_gradient_norm=5.):
-        return self._do_nothing_op
-
     def build_loss(self, label, **kwargs):
         return tf.constant(0.)
 
@@ -630,12 +652,6 @@ class PredictiveSequenceModel(ClassificationModel):
     '''A model that makes inferences over a sequenced input.'''
 
     def build_model_evolution(self, input, **kwargs):
-        pass
-
-    def reset(self, **kwargs):
-        '''
-        Reset whatever kind of state the model may have during the prediction along every sequence.
-        '''
         pass
 
     def build_model(self, input_sequence, num_units, **kwargs):
@@ -656,11 +672,6 @@ class PredictiveSequenceModel(ClassificationModel):
             # Avoid instantiating all the reusable variables again.
             tf.get_variable_scope().reuse_variables()
             return input_sequence, output, step + 1
-
-        loop_variables = '''[tf.TensorArray(tf.float32, size=tf.shape(input_sequence)[0],
-                                         flow=input_sequence).write(0, input_sequence),
-                          tf.TensorArray(tf.float32, size=tf.shape(input_sequence)[0]),
-                          tf.constant(0)]'''
 
         loop_variables = [input_sequence, tf.zeros([batch_size, self.output_size]), tf.constant(0)]
 
@@ -690,9 +701,8 @@ class DeepPredictiveSequenceModel(PredictiveSequenceModel):
             self._inner_sequence_models.append(inner_model)
             self.inner_models_names.append(inner_model.name)
 
-        return super(DeepPredictiveSequenceModel, self).build_model(input_sequence,
-                                                                    inner_sequence_models=inner_sequence_models,
-                                                                    **{**kwargs, 'num_units': inner_model.output_size})
+        return super().build_model(input_sequence, inner_sequence_models=inner_sequence_models,
+                                   **{**kwargs, 'num_units': inner_model.output_size})
 
     def build_model_evolution(self, current_step_input, inner_sequence_models, **kwargs):
         current_input = current_step_input
@@ -711,7 +721,7 @@ class LinearNN(PredictiveModel):
         return super(LinearNN, self).build_model(linear_neurons_layer(inputs, num_units, self.name))
 
 
-class Dropout(IntermidiateTransformation):
+class Dropout(PredictiveModel):
 
     def build_model(self, inputs, keep_prob, **kwargs):
         return tf.nn.dropout(inputs, keep_prob, name='Dropout/output')
@@ -1078,17 +1088,16 @@ class DataFrameDataSet(ArrayDataSet):
                 inputs = dataset_df.as_matrix()
                 labels = np.array([])
 
-        super(DataFrameDataSet, self).__init__(inputs, labels,
-                                               test_proportion=test_proportion,
-                                               validation_proportion=validation_proportion,
-                                               labels_names=labels_names, **kwargs)
+        super().__init__(inputs, labels,
+                         test_proportion=test_proportion, validation_proportion=validation_proportion,
+                         labels_names=labels_names, **kwargs)
 
 
 class CSVDataSet(DataFrameDataSet):
 
     def __init__(self, path_or_buffer, **kwargs):
         import pandas as pd
-        super(CSVDataSet, self).__init__(pd.read_csv(path_or_buffer, **kwargs), **kwargs)
+        super().__init__(pd.read_csv(path_or_buffer, **kwargs), **kwargs)
 
 
 def list_folder_files_with_extension(folder_path, extension):
@@ -1419,7 +1428,5 @@ class FmedLfaExperimentDataSet(SequentialDataMerge):
         eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration, **kwargs)
                                 for experiments_data_folder
                                 in experiments_data_folders]
-        super(FmedLfaExperimentDataSet, self).__init__(eeg_experiments_data,
-                                                       inputs_key=eeg_experiments_data[0].inputs_key,
-                                                       labels_key=eeg_experiments_data[0].labels_key,
-                                                       **kwargs)
+        super().__init__(eeg_experiments_data, inputs_key=eeg_experiments_data[0].inputs_key,
+                         labels_key=eeg_experiments_data[0].labels_key, **kwargs)

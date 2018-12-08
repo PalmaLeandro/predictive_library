@@ -35,11 +35,11 @@ class PredictiveModelTest(TestCase):
                                    test_proportion=0.4, validation_roportion=0.2)
 
         num_layers = 4
-        model = DeepPredictiveModel(num_features=[None, dataset.num_features],
+        model = DeepPredictiveModel(num_features=[None, dataset.num_features], num_classes=2,
                                     learning_rate_decay=0.6, num_units=20, keep_prob=0.8, batch_size=5,
                                     inner_sequence_models=[Dropout, BasicRNN] * num_layers,
                                     inner_models=[DeepPredictiveSequenceModel,
                                                   (LinearNN, {'num_units': dataset.num_classes}),
                                                   SoftmaxActivation])
-        model.train(dataset)
+        #model.train(dataset, num_epochs=1, batch_size=1)
         model.test(dataset)
