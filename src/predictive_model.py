@@ -31,9 +31,10 @@ def plot_dataset(inputs, labels=None, ax=None):
         plt.show()
 
 
-def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=[-3., 3.]):
+def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=None):
     import matplotlib.pyplot as plt
     import matplotlib.colors as colors
+    limits = limits if limits is not None else [-3., 3.]
 
     ax_arg = ax
     ax = ax_arg or plt.subplots(figsize=(10, 10))[1]
@@ -51,9 +52,8 @@ def plot_hyperplane(weights, bias, label=None, ax=None, color=None, limits=[-3.,
     if label is not None:
         ax.legend()
 
-    if limits is not None:
-        ax.set_xlim(limits)
-        ax.set_ylim(limits)
+    ax.set_xlim(limits)
+    ax.set_ylim(limits)
 
     ax.set_aspect('equal', 'box')
 
@@ -156,7 +156,7 @@ def log10(x):
 next_2_base = lambda x: 2 ** (int(np.log2(x)) + 1)
 
 
-def plot_hyperplanes(parameters, limits, ax_arg, ax):
+def plot_hyperplanes(parameters, limits=None, ax=None):
     hyperplanes_names = np.unique([name.split('/')[0] for name in parameters.keys()]).tolist()
     hyperplanes_weights = [variable_value
                            for variable_name, variable_value
@@ -178,9 +178,6 @@ def plot_hyperplanes(parameters, limits, ax_arg, ax):
                             label=hyperplanes_names + '_hyperplane_' + str(hyperplane_index),
                             ax=ax,
                             limits=limits)
-    if ax_arg is None:
-        import matplotlib.pyplot as plt
-        plt.show()
 
 
 def plot_learning(parameters, inputs=None, labels=None, ax_arg=None, limits=[-5., 5.]):
@@ -288,7 +285,7 @@ class PredictiveModel(DistribuibleProgram):
                     self.load(model_persistence_dir)
                 else:
                     self._batch_size = batch_size
-                    self._global_step = tf.Variable(0, name='global_step', trainable=False)
+                    self._global_step = tf.train.get_or_create_global_step()
 
                     inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
                     label = tf.placeholder(dtype=tf.float32, shape=[None], name='label')
@@ -299,6 +296,15 @@ class PredictiveModel(DistribuibleProgram):
                     self._inference_op = self.build_inference(self._model_output_op, **kwargs)
                     self._label_op = self.build_label(label, **kwargs)
                     self._loss_op = self.build_loss(self._label_op, self._model_output_op, **kwargs)
+                    self._summaries_op = self.build_summaries()
+                    self._global_initializer = tf.global_variables_initializer()
+
+
+            self._session = tf.train.MonitoredTrainingSession(master=self._worker_server.target,
+                                                               is_chief=(self._task_index == 0),
+                                                               checkpoint_dir=self._model_persistence_dir,
+                                                               config=self._cluster_config)
+            self._session.run(self._global_initializer)
 
         self.output_size = num_units
 
@@ -358,10 +364,6 @@ class PredictiveModel(DistribuibleProgram):
 
             losses.append(loss_value)
 
-            if summary_writer is not None:
-                summary_writer.add_summary(summaries, global_step=self._session.run(self._global_step))
-                summary_writer.flush()
-
             if batch_index in range(0, num_batches, math.ceil(num_batches * .1)):
                 logging.info('Completion: {}%'.format((batch_index * 100) // num_batches))
 
@@ -395,16 +397,12 @@ class PredictiveModel(DistribuibleProgram):
                 saver = tf.train.import_meta_graph(tf.train.latest_checkpoint(model_persistence_dir) + '.meta')
                 saver.restore(self._session, tf.train.latest_checkpoint(model_persistence_dir))
 
+    def build_summaries(self, **kwargs):
+        return self._do_nothing_op
+
     @property
     def name(self):
         return self.__class__.__name__
-
-    @property
-    def _session(self):
-        return tf.train.MonitoredTrainingSession(master=self._worker_server.target,
-                                                 is_chief=(self._task_index == 0),
-                                                 checkpoint_dir=self._model_persistence_dir,
-                                                 config=self._cluster_config)
 
     def reset(self, **kwargs):
         '''Reset whatever kind of state the model may have during the prediction if it is done over a sequence.'''
@@ -414,16 +412,44 @@ class PredictiveModel(DistribuibleProgram):
         return self.build_model(inputs, **kwargs)
 
 
-class TrainableModel(PredictiveModel):
+class ClassificationModel(PredictiveModel):
 
-    def __init__(self, initial_learning_rate=1., is_inner_model=False, **kwargs):
-        super().__init__(is_inner_model=is_inner_model, **kwargs)
-        if not is_inner_model:
-            self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
-            self._update_learning_rate_op = self.build_learning_rate_update(initial_learning_rate=initial_learning_rate,
-                                                                            **kwargs)
-            self._train_op = self.build_training(self._loss_op, **kwargs)
-            self.init_summaries(**kwargs)
+    def build_inference(self, model_output, name=None, **kwargs):
+        return super().build_inference(tf.argmax(tf.nn.softmax(model_output), axis=1), name='prediction', **kwargs)
+
+    def build_label(self, label, num_classes=None, loss='mean_squared_error', **kwargs):
+        if loss == 'cross_entropy':
+            return super(ClassificationModel, self).build_label(tf.cast(label, tf.int64))
+        else:
+            return super(ClassificationModel, self).build_label(tf.one_hot(tf.cast(label, tf.int64), num_classes))
+
+    def build_loss(self, label, prediction, loss='mean_squared_error', **kwargs):
+        if loss == 'cross_entropy':
+            return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
+                                                                                 labels=label,
+                                                                                 name='cross_entropy'),
+                                  name='cross_entropy_mean')
+        else:
+            return super().build_loss(label, prediction)
+
+    def test(self, data_set):
+        classifications = super().test(data_set)
+        confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
+                                                            data_set.test_labels,
+                                                            data_set.label_names)
+        return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
+
+
+class TrainableModel(ClassificationModel):
+
+    def build_loss(self, label, prediction, initial_learning_rate=1., **kwargs):
+        loss_op = super().build_loss(label, prediction, **kwargs)
+        self._learning_rate = tf.Variable(initial_learning_rate, name='learning_rate', trainable=False)
+        self._update_learning_rate_op = self.build_learning_rate_update(initial_learning_rate=initial_learning_rate,
+                                                                        **kwargs)
+        self._train_op = self.build_training(loss_op, **kwargs)
+        self.build_summaries(**kwargs)
+        return loss_op
 
     def build_training(self, loss, max_gradient_norm=5., **kwargs):
         '''Defines Gradient Descent with clipped norms as default training method.'''
@@ -438,70 +464,54 @@ class TrainableModel(PredictiveModel):
         self._learning_rate = tf.assign(self._learning_rate, initial_learning_rate * current_learning_rate_decay)
         return self._learning_rate
 
-    def init_summaries(self, log_dir=None, erase_log_dir=False, **kwargs):
+    def build_summaries(self, log_dir=None, erase_log_dir=False, **kwargs):
         if log_dir is not None:
-            self._summaries_op = tf.summary.merge_all()
             init_dir(log_dir, erase_log_dir)
             self._train_summary_writer = tf.summary.FileWriter(log_dir + '/train', self._session.graph)
             self._validation_summary_writer = tf.summary.FileWriter(log_dir + '/validation', self._session.graph)
             self._test_summary_writer = tf.summary.FileWriter(log_dir + '/test', self._session.graph)
+            return tf.summary.merge_all()
         else:
-            self._summaries_op = tf.no_op()
             self._train_summary_writer = self._validation_summary_writer = self._test_summary_writer = None
+            return super().build_summaries(**kwargs)
 
-    def train(self, dataset, num_epochs, validation_size=0.2, batch_size=20):
+    def train(self, dataset, num_epochs=1, validation_size=0., batch_size=1):
         import textwrap
         for epoch in range(num_epochs):
-            if not self._session.should_stop():
+            #if not self._session.should_stop():
 
                 # Calculate dataset's folds.
-                train_inputs, validation_inputs, \
-                train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
+            train_inputs, validation_inputs, \
+            train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
 
-                # Update model's parameters.
-                logging.info(textwrap.dedent('''
-                Training.
-                Epoch: {} .
-                Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate, {'epoch:0':epoch})))
-                self.report_execution(inputs=train_inputs,
-                                      labels=train_labels,
-                                      operation=self._train_op,
-                                      summary_writer=self._train_summary_writer,
-                                      batch_size=batch_size,
-                                      shuffle_samples=True,
-                                      epoch=epoch)
+            # Update model's parameters.
+            logging.info(textwrap.dedent('''
+            Training.
+            Epoch: {} .
+            Learning rate: {} .''').format(epoch, self._session.run(self._learning_rate, {'epoch:0':epoch})))
+            self.report_execution(inputs=train_inputs,
+                                  labels=train_labels,
+                                  operation=self._train_op,
+                                  summary_writer=self._train_summary_writer,
+                                  batch_size=min(batch_size, len(train_inputs)),
+                                  shuffle_samples=True,
+                                  epoch=epoch)
 
-                # Validate new model's parameters.
-                logging.info(textwrap.dedent('''
-                Validation.
-                Epoch: {} .''').format(epoch))
-                self.report_execution(inputs=validation_inputs,
-                                      labels=validation_labels,
-                                      operation=self._do_nothing_op,
-                                      summary_writer=self._validation_summary_writer,
-                                      batch_size=max(len(validation_labels) // 10, 10))
+            # Validate new model's parameters.
+            logging.info(textwrap.dedent('''
+            Validation.
+            Epoch: {} .''').format(epoch))
+            self.report_execution(inputs=validation_inputs,
+                                  labels=validation_labels,
+                                  operation=self._do_nothing_op,
+                                  summary_writer=self._validation_summary_writer,
+                                  batch_size=min(batch_size, len(validation_labels)))
 
-                self.save()
+            self.save()
 
     @property
     def parameters(self):
         return get_model_parameters(self.name, self._session)
-
-
-class ClassificationModel(TrainableModel):
-
-    def build_inference(self, model_output, name=None, **kwargs):
-        return super().build_inference(tf.argmax(tf.nn.softmax(model_output), axis=1), name='prediction', **kwargs)
-
-    def build_label(self, label, num_classes, **kwargs):
-        return super(ClassificationModel, self).build_label(tf.one_hot(tf.cast(label, tf.int64), num_classes))
-
-    def test(self, data_set):
-        classifications = super().test(data_set)
-        confusion_matrix_df = plot_confusion_matrix_heatmap(np.concatenate(classifications),
-                                                            data_set.test_labels,
-                                                            data_set.label_names)
-        return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
 
 class FastFourierTransform(PredictiveModel):
@@ -608,7 +618,7 @@ class SoftmaxActivation(PredictiveModel):
         return super().build_model(tf.nn.softmax(inputs))
 
 
-class DeepPredictiveModel(ClassificationModel):
+class DeepPredictiveModel(TrainableModel):
     '''A model that concatenates several PredictiveModels.'''
 
     def __init__(self, inner_models=None, **kwargs):
@@ -952,7 +962,7 @@ class ArrayDataSet(DataSet):
 
     @property
     def num_features(self):
-        sample_inputs = self.get_sample()[0]
+        sample_inputs = np.array(self.get_sample()[0])
         # If the sample is a sequence then return the length of the first step.
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
@@ -986,8 +996,12 @@ class ArrayDataSet(DataSet):
         return np.concatenate([self.train_labels, self.test_labels])
 
     def get_all_samples(self):
-        return np.concatenate([self._train_inputs, self._test_inputs]), \
-               np.concatenate([self._train_labels, self._test_labels])
+        if self._train_inputs != self._test_inputs:
+            return (np.concatenate([self._train_inputs, self._test_inputs]),
+                    np.concatenate([self._train_labels, self._test_labels]))
+        else:
+            return self._train_inputs, self._train_labels
+
 
     def get_sample(self):
         return sample_inputs_labels(*self.get_all_samples())
