@@ -299,11 +299,10 @@ class PredictiveModel(DistribuibleProgram):
                     self._summaries_op = self.build_summaries()
                     self._global_initializer = tf.global_variables_initializer()
 
-
             self._session = tf.train.MonitoredTrainingSession(master=self._worker_server.target,
-                                                               is_chief=(self._task_index == 0),
-                                                               checkpoint_dir=self._model_persistence_dir,
-                                                               config=self._cluster_config)
+                                                              is_chief=(self._task_index == 0),
+                                                              checkpoint_dir=self._model_persistence_dir,
+                                                              config=self._cluster_config)
             self._session.run(self._global_initializer)
 
         self.output_size = num_units
@@ -417,14 +416,14 @@ class ClassificationModel(PredictiveModel):
     def build_inference(self, model_output, name=None, **kwargs):
         return super().build_inference(tf.argmax(tf.nn.softmax(model_output), axis=1), name='prediction', **kwargs)
 
-    def build_label(self, label, num_classes=None, loss='mean_squared_error', **kwargs):
-        if loss == 'cross_entropy':
+    def build_label(self, label, num_classes=None, risk_function='mean_squared_error', **kwargs):
+        if risk_function == 'cross_entropy':
             return super(ClassificationModel, self).build_label(tf.cast(label, tf.int64))
         else:
             return super(ClassificationModel, self).build_label(tf.one_hot(tf.cast(label, tf.int64), num_classes))
 
-    def build_loss(self, label, prediction, loss='mean_squared_error', **kwargs):
-        if loss == 'cross_entropy':
+    def build_loss(self, label, prediction, risk_function='mean_squared_error', **kwargs):
+        if risk_function == 'cross_entropy':
             return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
                                                                                  labels=label,
                                                                                  name='cross_entropy'),
