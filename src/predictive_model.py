@@ -78,7 +78,7 @@ def plot_confusion_matrix_heatmap(predictions, labels, classes_labels=None, show
                                        in confusion_matrix_df.iterrows()]
     sns.heatmap(confusion_matrix_df, annot=True, ax=plt.subplots(figsize=(18, 10))[1],
                 cmap=sns.color_palette("Blues"))
-    plt.xticks(rotation=0)
+    plt.xticks(rotation=90)
     plt.yticks(rotation=0)
     if show_plot: plt.show()
     return confusion_matrix_df
@@ -288,13 +288,14 @@ class PredictiveModel(DistribuibleProgram):
                  model_persistence_dir=None, erase_model_persistence_dir=True,
                  is_inner_model=False, **kwargs):
         if not is_inner_model:
-            super().__init__(cluster_machines)
+            #super().__init__(cluster_machines)
             self._model_persistence_dir = model_persistence_dir
             self._erase_model_persistence_dir = erase_model_persistence_dir
 
-            ps_strategy = tf.contrib.training.GreedyLoadBalancingStrategy(len(cluster_machines),
-                                                                          tf.contrib.training.byte_size_load_fn)
-            with tf.device(tf.train.replica_device_setter(self._cluster, ps_strategy=ps_strategy)):
+            # ps_strategy = tf.contrib.training.GreedyLoadBalancingStrategy(len(cluster_machines),
+            #                                                               tf.contrib.training.byte_size_load_fn)
+            if True:
+            #with tf.device(tf.train.replica_device_setter(self._cluster, ps_strategy=ps_strategy)):
                 if model_persistence_dir is not None:
                     self.load(model_persistence_dir)
                 else:
@@ -313,10 +314,12 @@ class PredictiveModel(DistribuibleProgram):
                     self._summaries_op = self.build_summaries()
                     self._global_initializer = tf.global_variables_initializer()
 
-            self._session = tf.train.MonitoredTrainingSession(master=self._worker_server.target,
-                                                              is_chief=(self._task_index == 0),
-                                                              checkpoint_dir=self._model_persistence_dir,
-                                                              config=self._cluster_config)
+            self._session = tf.Session()
+            self._task_index = 0
+            # tf.train.MonitoredTrainingSession(master=self._worker_server.target,
+                           #                                   is_chief=(self._task_index == 0),
+                           #                                   checkpoint_dir=self._model_persistence_dir,
+                           #                                   config=self._cluster_config)
             self._session.run(self._global_initializer)
 
         self.output_size = num_units
@@ -326,7 +329,7 @@ class PredictiveModel(DistribuibleProgram):
         Defines the model output to be used to infer a prediction, given the provided input.
         Needs to be implemented by subclasses.
         '''
-        output = tf.identity(inputs, name=name or (self.name + '_inference'))
+        output = tf.identity(inputs, name=name or self.name)
         self.output_size = tf.shape(inputs)[1:]
         return output
 
@@ -453,7 +456,7 @@ class ClassificationModel(PredictiveModel):
         return confusion_matrix_df['Accuracy'].sum() / len(confusion_matrix_df['Accuracy'])
 
 
-class TrainableModel(ClassificationModel):
+class TrainableModel(PredictiveModel):
 
     def build_loss(self, label, prediction, initial_learning_rate=1., **kwargs):
         loss_op = super().build_loss(label, prediction, **kwargs)
@@ -586,6 +589,22 @@ class BatchAggregation(PredictiveModel):
             return super().build_model(tf.reduce_mean(inputs, dimensions))
 
 
+class BatchNormalization(PredictiveModel):
+
+    def build_model(self, inputs, dimensions=None, **kwargs):
+        if dimensions is None:
+            # not_batch_dimensions_indexes:
+            dimensions = [dimension_index for dimension_index in range(len(inputs.get_shape()))][1:]
+        max = tf.reduce_max(inputs, dimensions)
+        min = tf.reduce_min(inputs, dimensions)
+        var = max - min
+        dimensions_mask = [1 if dimension_index not in dimensions else inputs.get_shape().dims[dimension_index].value
+                           for dimension_index in range(len(inputs.get_shape()))]
+        min = tf.tile(tf.expand_dims(min, dimensions), dimensions_mask)
+        var = tf.tile(tf.expand_dims(var, dimensions), dimensions_mask)
+        return super().build_model((inputs - min) / var)
+
+
 def load_stored_parameters(parameters):
     if type(parameters) is np.ndarray:
         return parameters
@@ -631,7 +650,7 @@ class SoftmaxActivation(PredictiveModel):
         return super().build_model(tf.nn.softmax(inputs))
 
 
-class DeepPredictiveModel(TrainableModel):
+class TransformationPipeline(PredictiveModel):
     '''A model that concatenates several PredictiveModels.'''
 
     def __init__(self, inner_models=None, **kwargs):
@@ -665,10 +684,8 @@ class DeepPredictiveModel(TrainableModel):
         return parameters
 
 
-class TransformationPipeline(DeepPredictiveModel):
-
-    def build_loss(self, label, **kwargs):
-        return tf.constant(0.)
+class DeepPredictiveModel(TrainableModel, ClassificationModel, TransformationPipeline):
+    ''''''
 
 
 class PredictiveSequenceModel(ClassificationModel):
@@ -818,3 +835,24 @@ class IterativeNN(ClassificationModel):
             return inputs + (1 - activation) * weights_T + activation * (-2) * projection * (weights_T / weights_norm)
 
         return tf.while_loop(iteration_condition, iteration_execution, [input], maximum_iterations=max_it)
+
+
+class MovingAverageSubtraction(PredictiveModel):
+
+    def build_model(self, inputs, num_features, num_neighbouring_bins=2, **kwargs):
+        num_pair_bins_to_average = num_neighbouring_bins // 2
+
+        diagonal = tf.eye(num_features[-1] + num_pair_bins_to_average * 2)
+
+        cumulative_diagonal = tf.identity(diagonal, name='diagonal_matrix')
+        for neighbouring_bin_pair_index in range(1, num_pair_bins_to_average):
+            cumulative_diagonal += tf.manip.roll(diagonal, neighbouring_bin_pair_index, 0)
+            cumulative_diagonal += tf.manip.roll(diagonal, -neighbouring_bin_pair_index, 0)
+
+        cumulative_diagonal = cumulative_diagonal[num_pair_bins_to_average:num_features[-1] + num_pair_bins_to_average,
+                                                  num_pair_bins_to_average:num_features[-1] + num_pair_bins_to_average]
+        cumulative_diagonal /= (num_pair_bins_to_average * 2 + 1)
+
+        bins_average = tf.tensordot(inputs, cumulative_diagonal, [[-1], [0]])
+
+        return super().build_model(inputs - bins_average)

@@ -5,42 +5,6 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 
-class DataSet(object):
-
-    @property
-    def inputs(self):
-        pass
-
-    @property
-    def labels(self):
-        pass
-
-    @property
-    def labels_names(self):
-        pass
-
-    def get_all_samples(self):
-        pass
-
-    def get_sample(self):
-        pass
-
-    def get_sample_batch(self, batch_size):
-        pass
-
-    def provide_train_validation_random_partition(self):
-        pass
-
-    def balance_classes(self, **kwargs):
-        pass
-
-    def add_samples(self, inputs, labels, **kwargs):
-        pass
-
-    def blend_classes(self, classes_to_blend, **kwargs):
-        pass
-
-
 def dataset_class_distribution(labels, labels_names=None, show_table=True, plot_chart=True, ax=None, **kwargs):
     classes_histogram = np.unique(np.array(labels).tolist(), return_counts=True)
     if not show_table and not plot_chart:
@@ -131,24 +95,46 @@ def bucket_indices(indices, cuts):
     return buckets
 
 
-class ArrayDataSet(DataSet):
+class DataSet(object):
 
-    def __init__(self, inputs, labels=np.array([]), test_proportion=None, validation_proportion=None, labels_names=None,
-                 exact_set_division=True, inputs_key=0, labels_key=1, **kwargs):
+    def __init__(self, validation_proportion=None, labels_names=None, feature_names=None, exact=True,
+                 inputs_key=0, labels_key=1, **kwargs):
         self.validation_proportion = validation_proportion
         self._labels_names = labels_names
-        self.exact_set_division = exact_set_division
+        self._feature_names = feature_names
+        self.exact = exact
         self.inputs_key = inputs_key
         self.labels_key = labels_key
-        if test_proportion is None:
-            self._train_inputs, self._train_labels = inputs, labels
-            self._test_inputs, self._test_labels = inputs, labels
-        else:
-            self._train_inputs, \
-            self._test_inputs, \
-            self._train_labels, \
-            self._test_labels = divide_inputs_labels_set_randomly(inputs, labels, test_proportion, exact_set_division,
-                                                                  inputs_key, labels_key)
+
+    @property
+    def inputs(self):
+        pass
+
+    @property
+    def labels(self):
+        pass
+
+    @property
+    def train_inputs(self):
+        pass
+
+    @property
+    def train_labels(self):
+        pass
+
+    @property
+    def test_inputs(self):
+        pass
+
+    @property
+    def test_labels(self):
+        pass
+
+    def get_all_samples(self):
+        pass
+
+    def get_sample_batch(self, batch_size):
+        pass
 
     @property
     def labels_names(self):
@@ -156,19 +142,24 @@ class ArrayDataSet(DataSet):
                else [str(label) for label in range(self.num_classes)]
 
     @property
+    def features_names(self):
+        return self._feature_names if self._feature_names is not None \
+               else [str(feature) for feature in range(self.num_features)]
+
+    @property
     def num_samples(self):
-        return len(self.get_all_samples()[0])
+        return len(self.inputs)
 
     def __len__(self):
         return self.num_samples
 
     @property
     def num_train_samples(self):
-        return len(self._train_inputs)
+        return len(self.train_inputs)
 
     @property
     def num_test_samples(self):
-        return len(self._test_inputs)
+        return len(self.test_inputs)
 
     @property
     def test_proportion(self):
@@ -177,7 +168,7 @@ class ArrayDataSet(DataSet):
     @property
     def num_classes(self):
         # Consider labels as indices being counted from zero.
-        return np.array(self._train_labels).max() + 1
+        return np.array(self.train_labels).max() + 1
 
     @property
     def num_features(self):
@@ -185,56 +176,19 @@ class ArrayDataSet(DataSet):
         # If the sample is a sequence then return the length of the first step.
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
-    def provide_train_validation_random_partition(self, validation_proportion=None, exact_set_division=None):
-        return divide_inputs_labels_set_randomly(self._train_inputs, self._train_labels,
+    def provide_train_validation_random_partition(self, validation_proportion=None, exact=None):
+        return divide_inputs_labels_set_randomly(self.train_inputs, self.train_labels,
                                                  validation_proportion or self.validation_proportion,
-                                                 exact_set_division or self.exact_set_division)
+                                                 exact or self.exact)
 
-    @property
-    def train_inputs(self):
-        return self._train_inputs
+    def get_sample(self, return_sample_index=False):
+        return sample_input_label(self.inputs, self.labels, return_sample_index=False)
 
-    @property
-    def train_labels(self):
-        return self._train_labels
-
-    @property
-    def test_inputs(self):
-        return self._test_inputs
-
-    @property
-    def test_labels(self):
-        return self._test_labels
-
-    @property
-    def inputs(self):
-        if self._train_inputs is self._test_inputs:
-            return self._train_inputs
-        else:
-            return np.concatenate([self.train_inputs, self.test_inputs])
-
-    @property
-    def labels(self):
-        if self._train_labels is self._test_labels:
-            return self._train_labels
-        else:
-            return np.concatenate([self.train_labels, self.test_labels])
-
-    def get_all_samples(self):
-        if self._train_inputs is self._test_inputs and self._train_labels is self._test_labels:
-            return self.train_inputs, self._train_labels
-        else:
-            return (np.concatenate([self._train_inputs, self._test_inputs]),
-                    np.concatenate([self._train_labels, self._test_labels]))
-
-    def get_sample(self):
-        return sample_input_label(*self.get_all_samples())
-
-    def get_train_sample(self):
-        return sample_input_label(self._train_inputs, self._train_labels)
+    def get_train_sample(self, return_sample_index=False):
+        return sample_input_label(self.train_inputs, self.train_labels, return_sample_index=False)
 
     def get_test_sample(self):
-        return sample_input_label(self._test_inputs, self._test_labels)
+        return sample_input_label(self.test_inputs, self.test_labels, return_sample_index=False)
 
     def classes_distribution(self, show_chart=True):
         classes_histogram_df, ax = dataset_class_distribution(self.labels, self._labels_names)
@@ -332,27 +286,6 @@ class ArrayDataSet(DataSet):
         if len(samples_indices_to_remove) > 0:
             self.remove_samples(samples_indices_to_remove)
 
-    def add_samples(self, inputs_to_add, labels_to_add, **kwargs):
-        samples_division = divide_inputs_labels_set_randomly(inputs_to_add, labels_to_add, self.test_proportion, False)
-        train_inputs_to_add, test_inputs_to_add, train_labels_to_add, test_labels_to_add = samples_division
-
-        self._train_inputs = np.concatenate([self.train_inputs, train_inputs_to_add])
-        self._train_labels = np.concatenate([self.train_labels, train_labels_to_add])
-        self._test_inputs = np.concatenate([self.test_inputs, test_inputs_to_add])
-        self._test_labels = np.concatenate([self.test_labels, test_labels_to_add])
-
-    def remove_samples(self, samples_indices):
-        train_samples, test_samples = bucket_indices(samples_indices, [self.num_train_samples, self.num_samples])
-        test_samples -= self.num_train_samples
-        self._train_inputs = np.delete(self._train_inputs, train_samples, 0)
-        self._train_labels = np.delete(self._train_labels, train_samples, 0)
-        self._test_inputs = np.delete(self._test_inputs, test_samples, 0)
-        self._test_labels = np.delete(self._test_labels, test_samples, 0)
-
-    def replace_labels(self, mapping):
-        self._train_labels = np.array([mapping.get(label, label) for label in self._train_labels])
-        self._test_labels = np.array([mapping.get(label, label) for label in self._test_labels])
-
     def blend_classes(self, classes_to_blend, blend_name=None):
         classes_to_blend = [self.labels_names.index(class_label) if isinstance(class_label, str) else class_label
                             for class_label in classes_to_blend]
@@ -384,8 +317,83 @@ class ArrayDataSet(DataSet):
                 if key[1] == self.inputs_key:
                     return self.inputs
 
+    def add_samples(self, inputs_to_add, labels_to_add, **kwargs):
+        pass
 
-class DataFrameDataSet(ArrayDataSet):
+    def remove_samples(self, samples_indices):
+        pass
+
+    def replace_labels(self, mapping):
+        pass
+
+
+class ArrayDataSet(DataSet):
+
+    def __init__(self, inputs, labels=np.array([]), test_proportion=None, **kwargs):
+        super().__init__(**kwargs)
+        if test_proportion is None:
+            self._train_inputs, self._train_labels = inputs, labels
+            self._test_inputs, self._test_labels = inputs, labels
+        else:
+            self._train_inputs, \
+            self._test_inputs, \
+            self._train_labels, \
+            self._test_labels = divide_inputs_labels_set_randomly(inputs, labels, test_proportion, self.exact,
+                                                                  self.inputs_key, self.labels_key)
+
+    @property
+    def train_inputs(self):
+        return self._train_inputs
+
+    @property
+    def train_labels(self):
+        return self._train_labels
+
+    @property
+    def test_inputs(self):
+        return self._test_inputs
+
+    @property
+    def test_labels(self):
+        return self._test_labels
+
+    @property
+    def inputs(self):
+        if self._train_inputs is self._test_inputs:
+            return self._train_inputs
+        else:
+            return np.concatenate([self.train_inputs, self.test_inputs])
+
+    @property
+    def labels(self):
+        if self._train_labels is self._test_labels:
+            return self._train_labels
+        else:
+            return np.concatenate([self._train_labels, self._test_labels])
+
+    def add_samples(self, inputs_to_add, labels_to_add, **kwargs):
+        samples_division = divide_inputs_labels_set_randomly(inputs_to_add, labels_to_add, self.test_proportion, False)
+        train_inputs_to_add, test_inputs_to_add, train_labels_to_add, test_labels_to_add = samples_division
+
+        self._train_inputs = np.concatenate([self.train_inputs, train_inputs_to_add])
+        self._train_labels = np.concatenate([self.train_labels, train_labels_to_add])
+        self._test_inputs = np.concatenate([self.test_inputs, test_inputs_to_add])
+        self._test_labels = np.concatenate([self.test_labels, test_labels_to_add])
+
+    def remove_samples(self, samples_indices):
+        train_samples, test_samples = bucket_indices(samples_indices, [self.num_train_samples, self.num_samples])
+        test_samples -= self.num_train_samples
+        self._train_inputs = np.delete(self._train_inputs, train_samples, 0)
+        self._train_labels = np.delete(self._train_labels, train_samples, 0)
+        self._test_inputs = np.delete(self._test_inputs, test_samples, 0)
+        self._test_labels = np.delete(self._test_labels, test_samples, 0)
+
+    def replace_labels(self, mapping):
+        self._train_labels = np.array([mapping.get(label, label) for label in self._train_labels])
+        self._test_labels = np.array([mapping.get(label, label) for label in self._test_labels])
+
+
+class DataFrameDataSet(DataSet):
 
     def __init__(self, dataset_df, sample_field=None, step_field=None, label_field=None,
                  test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
@@ -447,7 +455,7 @@ def list_folder_files_with_extension(folder_path, extension):
     return [filename for filename in glob.glob(folder_path) if filename.split('.')[-1] == extension]
 
 
-class SequentialData(ArrayDataSet):
+class SequentialDataSet(DataSet):
 
     @property
     def num_samples(self):
@@ -460,63 +468,84 @@ class SequentialData(ArrayDataSet):
     @property
     def steps_per_sample(self):
         pass
+
+    @property
+    def units_per_sample(self):
+        return 1
 
     @property
     def shape(self):
         return [self.num_samples, self.steps_per_sample, self.num_features]
 
+    def plot_sample(self, sample=None, sample_index=None, axes=None, step_pace=None, first_ax_title=None):
+        import matplotlib.pyplot as plt
 
-class PartialSequentialData(SequentialData):
-    """Class that wraps a SequentialData in order to retrieve only part of it, reusing its main functionality.
-       This is particularly useful to retrieve inputs or labels separately to build an ArrayDataSet."""
+        _axes = axes if axes is not None else plt.subplots(self.num_features, figsize=(16, 3 * self.num_features))[1]
 
-    def __init__(self, complete_sequential_data):
-        self.complete_sequential_data = complete_sequential_data
+        if sample is not None:
+            sequence_inputs, sequence_label = sample
+        else:
+            if sample_index is not None:
+                sequence_inputs, sequence_label = self.sample_at(sample_index)
+            else:
+                sequence_inputs, sequence_label, sample_index = self.get_sample(return_sample_index=True)
+
+        steps_per_sample, num_features = sequence_inputs.shape
+
+        first_ax_title = ((first_ax_title + '\n') if first_ax_title is not None else '')
+        first_ax_title += 'Sample {sample_index}, Class {sample_class}'
+        sample_class = sequence_label if isinstance(sequence_label, str) else self.labels_names[sequence_label]
+        _axes[0].set_title(first_ax_title.format(sample_index=sample_index, sample_class=sample_class))
+
+        step_pace = step_pace if step_pace is not None else self.units_per_sample / float(self.steps_per_sample)
+        for dimension_index in range(num_features):
+            _axes[dimension_index].plot(np.array(range(steps_per_sample)) * step_pace,
+                                        sequence_inputs[:, dimension_index], label=self.features_names[dimension_index])
+            _axes[dimension_index].legend()
+
+        if axes is None:
+            plt.show()
+
+
+class PartialDataSet(DataSet):
+    """Class that wraps a DataSet in order to retrieve only part of it, reusing its main functionality.
+       This is particularly useful to retrieve inputs or labels separately in order to build an ArrayDataSet."""
+
+    def __init__(self, complete_data_set, data_key, **kwargs):
+        self.data_key = data_key
+        self.complete_data_set = complete_data_set
+        super().__init__(**kwargs)
+
+    def __getitem__(self, key):
+        return self.complete_data_set[key][self.data_key]
+
+    def tolist(self):
+        return self.complete_data_set[:, self.data_key]
 
     @property
     def num_samples(self):
-        return self.complete_sequential_data.num_samples
+        return self.complete_data_set.num_samples
 
     @property
     def num_features(self):
-        return self.complete_sequential_data.num_features
-
-    @property
-    def steps_per_sample(self):
-        return self.complete_sequential_data.steps_per_sample
+        return self.complete_data_set.num_features
 
     @property
     def num_classes(self):
-        return self.complete_sequential_data.num_classes
+        return self.complete_data_set.num_classes
 
 
-class KeyPartialSequentialData(PartialSequentialData):
+class PartialSequentialDataSet(PartialDataSet, SequentialDataSet):
+    """Class that wraps a SequentialDataSet in order to retrieve only part of it, reusing its main functionality.
+       This is particularly useful to retrieve inputs or labels separately to build an ArrayDataSet."""
 
-    def __init__(self, data_key, **kwargs):
-        self.data_key = data_key
-        super(KeyPartialSequentialData, self).__init__(**kwargs)
-
-    def __getitem__(self, key):
-        return self.complete_sequential_data[key][self.data_key]
-
-    def get_all_samples(self):
-        return self.complete_sequential_data[:, self.data_key]
-
-    def tolist(self):
-        return self.complete_sequential_data[:, self.data_key]
+    @property
+    def steps_per_sample(self):
+        return self.complete_data_set.steps_per_sample
 
 
 def data_partition(data_sets, key):
     return DataSetsMerge([data_set[:, key] for data_set in data_sets])
-
-
-def validate_train_labels(labels):
-    labels = labels.tolist()
-    if np.max(labels) != len(np.unique(labels)) - 1:
-        for label in range(max(np.max(labels), len(np.unique(labels)))):
-            if label not in np.unique(labels):
-                labels = np.append(labels, np.array([label]))
-    return labels
 
 
 def coarse_subsets_partition(subsets, ratio, shuffle=True):
@@ -538,29 +567,38 @@ def coarse_subsets_partition(subsets, ratio, shuffle=True):
     return A, B
 
 
-class DataSetsMerge(ArrayDataSet):
+class DataSetsMerge(DataSet):
 
-    def __init__(self, data_sets, test_proportion=0., validation_proportion=None, labels_names=None,
-                 exact_merge=False, inputs_key=0, labels_key=1, **kwargs):
-        self.data_sets = data_sets
-        self.exact_merge = exact_merge
-        self.inputs_key = inputs_key
-        self.labels_key = labels_key
-        self._labels_names = labels_names
+    def __init__(self, data_sets, test_proportion=0., **kwargs):
+        train_sequences_sets, test_sequences_sets = coarse_subsets_partition(data_sets, 1 - test_proportion)
+        self.num_train_data_sets = len(train_sequences_sets)
+        self.data_sets = train_sequences_sets + test_sequences_sets
+        super().__init__(**kwargs)
 
-        if exact_merge:
-            super(SequentialData, self).__init__(inputs=KeyPartialSequentialData(inputs_key,
-                                                                                 complete_sequential_data=self),
-                                                 labels=KeyPartialSequentialData(labels_key,
-                                                                                 complete_sequential_data=self),
-                                                 test_proportion=test_proportion,
-                                                 validation_proportion=validation_proportion,
-                                                 labels_names=labels_names, **kwargs)
-        else:
-            train_sequences_sets, test_sequences_sets = coarse_subsets_partition(data_sets,
-                                                                                 1 - test_proportion)
-            self.num_train_data_sets = len(train_sequences_sets)
-            self.data_sets = train_sequences_sets + test_sequences_sets
+    def provide_exact_merge(self):
+        return ArrayDataSet(inputs=PartialDataSet(self, self.inputs_key),
+                            labels=PartialDataSet(self, self.labels_key),
+                            test_proportion=self.test_proportion,
+                            labels_names=self.labels_names,
+                            feature_names=self.features_names,
+                            inputs_key=self.data_sets[0].inputs_key,
+                            labels_key=self.data_sets[0].labels_key)
+
+    @property
+    def labels_names(self):
+        return self.data_sets[0].labels_names
+
+    @property
+    def features_names(self):
+        return self.data_sets[0].features_names
+
+    @property
+    def inputs(self):
+        return data_partition(self.data_sets, self.inputs_key)
+
+    @property
+    def labels(self):
+        return data_partition(self.data_sets, self.labels_key)
 
     @property
     def train_inputs(self):
@@ -578,47 +616,37 @@ class DataSetsMerge(ArrayDataSet):
     def test_labels(self):
         return data_partition(self.data_sets[self.num_train_data_sets:], self.labels_key)
 
-    @property
-    def inputs(self):
-        return data_partition(self.data_sets, self.inputs_key)
-
-    @property
-    def labels(self):
-        return data_partition(self.data_sets, self.labels_key)
-
     def provide_train_validation_random_partition(self, validation_proportion=None):
         '''For training and validating by bootstraping(sampling with repetitions).'''
         validation_proportion = validation_proportion or self.validation_proportion
-        if self.exact_merge:
-            return super(DataSetsMerge, self).provide_train_validation_random_partition(validation_proportion)
-        else:
-            train_sequence_sets = self.data_sets[:self.num_train_data_sets]
 
-            train_fold, validation_fold = divide_set_randomly(train_sequence_sets, validation_proportion)
+        train_sequence_sets = self.data_sets[:self.num_train_data_sets]
 
-            train_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
-                                               for data_set in train_fold],
-                                              test_proportion=0, validation_proportion=0,
-                                              labels_names=self.labels_names, exact_merge=False,
-                                              inputs_key=self.inputs_key, labels_key=self.labels_key)
-            train_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
-                                               for data_set in train_fold],
-                                              test_proportion=1, validation_proportion=0,
-                                              labels_names=self.labels_names, exact_merge=False,
-                                              inputs_key=self.inputs_key, labels_key=self.labels_key)
+        train_fold, validation_fold = divide_set_randomly(train_sequence_sets, validation_proportion)
 
-            validation_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
-                                                    for data_set in validation_fold],
-                                                   test_proportion=0, validation_proportion=1,
-                                                   labels_names=self.labels_names, exact_merge=False,
-                                                   inputs_key=self.inputs_key, labels_key=self.labels_key)
-            validation_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
-                                                    for data_set in validation_fold],
-                                                   test_proportion=1, validation_proportion=1,
-                                                   labels_names=self.labels_names, exact_merge=False,
-                                                   inputs_key=self.inputs_key, labels_key=self.labels_key)
+        train_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
+                                           for data_set in train_fold],
+                                          test_proportion=0, validation_proportion=0,
+                                          labels_names=self.labels_names, exact_merge=False,
+                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
+        train_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
+                                           for data_set in train_fold],
+                                          test_proportion=1, validation_proportion=0,
+                                          labels_names=self.labels_names, exact_merge=False,
+                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
 
-            return train_fold_inputs, validation_fold_inputs, train_fold_labels, validation_fold_labels
+        validation_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
+                                                for data_set in validation_fold],
+                                               test_proportion=0, validation_proportion=1,
+                                               labels_names=self.labels_names, exact_merge=False,
+                                               inputs_key=self.inputs_key, labels_key=self.labels_key)
+        validation_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
+                                                for data_set in validation_fold],
+                                               test_proportion=1, validation_proportion=1,
+                                               labels_names=self.labels_names, exact_merge=False,
+                                               inputs_key=self.inputs_key, labels_key=self.labels_key)
+
+        return train_fold_inputs, validation_fold_inputs, train_fold_labels, validation_fold_labels
 
     @property
     def num_samples(self):
@@ -665,6 +693,12 @@ class DataSetsMerge(ArrayDataSet):
         else:
             return [self.sample_at(index) for index in np.array(range(self.num_samples))[key]]
 
+    def get_sample(self, return_sample_index=False):
+        import random
+        sample_index = random.randint(0, self.num_samples)
+        sample_inputs, sample_label = self.sample_at(sample_index)
+        return (sample_inputs, sample_label, sample_index) if return_sample_index else (sample_inputs, sample_label)
+
     def tolist(self):
         return [self.sample_at(sample_index) for sample_index in range(self.num_samples)]
 
@@ -691,33 +725,37 @@ class DataSetsMerge(ArrayDataSet):
             data_set.replace_labels(mapping)
 
 
-class SequentialDataSetsMerge(DataSetsMerge, SequentialData):
+class SequentialDataSetsMerge(DataSetsMerge, SequentialDataSet):
 
     @property
     def steps_per_sample(self):
         return self.data_sets[0].shape[-2]
 
+    @property
+    def units_per_sample(self):
+        return self.data_sets[0].units_per_sample
 
-class EpochEegExperimentData(SequentialData):
-    eeg_signal_sample_position = 0
-    label_sample_position = 1
+
+class EpochEegExperimentDataSet(SequentialDataSet):
 
     def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None,
                  transformation=None, **kwargs):
+        super().__init__(**kwargs)
         self.files_folder_path = files_folder_path
         self.epoch_duration = epoch_duration
         self.low_frequencies_cut = low_frequencies_cut
         self.high_frequencies_cut = high_frequencies_cut
 
-        # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
-        signal_classification = self.signal_classification
-        steps_per_sample = self.steps_per_sample
-        self.valid_samples = np.array([(onset, label)
-                                       for onset_index, (onset, label) in enumerate(signal_classification)
-                                       if onset_index + 1 < len(signal_classification)
-                                          and (signal_classification[onset_index + 1][0] - onset) == steps_per_sample])
+        self.valid_samples = self.validate_samples(self.signal_classification)
         self.transformation = transformation if not isinstance(transformation, str) \
             else self._build_transformation(transformation)
+
+    def validate_samples(self, signal_classification, labels_mapping={}):
+        # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
+        return np.array([(onset, labels_mapping.get(label, label))
+                         for onset_index, (onset, label) in enumerate(signal_classification)
+                         if onset_index + 1 < len(signal_classification)
+                         and (signal_classification[onset_index + 1][0] - onset) == self.steps_per_sample])
 
     def _build_transformation(self, transformation):
         if transformation == 'standardization':
@@ -728,10 +766,15 @@ class EpochEegExperimentData(SequentialData):
         raise NotImplementedError()
 
     @property
+    def units_per_sample(self):
+        return self.epoch_duration
+
+    @property
     def eeg_signals(self):
         import mne
         set_filename = list_folder_files_with_extension(self.files_folder_path, 'set')[0]
-        return mne.io.read_raw_eeglab(input_fname=set_filename, preload=False)
+        raw_eeglab = mne.io.read_raw_eeglab(input_fname=set_filename, preload=False, stim_channel=False, eog='auto')
+        return raw_eeglab.pick_types(eeg=True, eog=False, emg=False, stim=False)
 
     @property
     def signal_classification(self):
@@ -748,20 +791,17 @@ class EpochEegExperimentData(SequentialData):
     @property
     def num_features(self):
         import mne
-        return len(mne.pick_types(self.eeg_signals.info, eeg=True, stim=False))
+        return len(mne.pick_types(self.eeg_signals.info, eeg=True, eog=False, emg=False, stim=False))
+
+    @property
+    def features_names(self):
+        # Omit stim channel
+        return self.eeg_signals.ch_names
 
     @property
     def num_classes(self):
         # Plus one since classes are considerated to be enumerated from 0.
-        return np.array(self.valid_samples)[:, self.label_sample_position].max() + 1
-
-    @property
-    def inputs_key(self):
-        return self.eeg_signal_sample_position
-
-    @property
-    def labels_key(self):
-        return self.label_sample_position
+        return np.array(self.valid_samples)[:, self.labels_key].max() + 1
 
     def _transform_raw_signal_data(self, raw_data):
         import mne
@@ -774,7 +814,7 @@ class EpochEegExperimentData(SequentialData):
 
     @property
     def inputs(self):
-        return KeyPartialSequentialData(data_key=self.inputs_key, complete_sequential_data=self)
+        return PartialDataSet(data_key=self.inputs_key, complete_data_set=self)
 
     @property
     def labels(self):
@@ -782,17 +822,16 @@ class EpochEegExperimentData(SequentialData):
 
     def sample_at(self, index):
         onset, label = self.valid_samples[index]
-        # Omit empty stim channel and time dimmension.
-        return self._transform_raw_signal_data(self.eeg_signals[:-1, onset:onset + self.steps_per_sample][0]), label
+        return self._transform_raw_signal_data(self.eeg_signals[:, onset:onset + self.steps_per_sample][0]), label
 
     def remove_samples(self, samples_indices):
         self.valid_samples = np.delete(self.valid_samples, samples_indices, 0)
 
     def replace_labels(self, mapping):
-        self.valid_samples = np.array([(onset, mapping.get(label, label)) for onset, label in self.valid_samples])
+        self.valid_samples = self.validate_samples(self.signal_classification, mapping)
 
 
-class FmedLfaEegExperimentData(EpochEegExperimentData):
+class FmedLfaEegExperimentData(EpochEegExperimentDataSet):
 
     @property
     def signal_classification(self):
@@ -813,5 +852,8 @@ class FmedLfaExperimentDataSet(SequentialDataSetsMerge):
         eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration, **kwargs)
                                 for experiments_data_folder
                                 in experiments_data_folders]
-        super().__init__(eeg_experiments_data, inputs_key=eeg_experiments_data[0].inputs_key,
-                         labels_key=eeg_experiments_data[0].labels_key, **kwargs)
+        super().__init__(eeg_experiments_data,
+                         inputs_key=eeg_experiments_data[0].inputs_key,
+                         labels_key=eeg_experiments_data[0].labels_key,
+                         feature_names=eeg_experiments_data[0].features_names,
+                         **kwargs)
