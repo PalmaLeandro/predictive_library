@@ -498,7 +498,7 @@ class TrainableModel(PredictiveModel):
 
                 # Calculate dataset's folds.
             train_inputs, validation_inputs, \
-            train_labels, validation_labels = dataset.provide_train_validation_random_partition(validation_size)
+            train_labels, validation_labels = dataset.provide_train_validation_partition(validation_size)
 
             # Update model's parameters.
             logging.info(textwrap.dedent('''

@@ -22,9 +22,9 @@ def dataset_class_distribution(labels, labels_names=None, show_table=True, plot_
         import matplotlib.pyplot as plt
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 10), sharex=True, sharey=True, **kwargs)
+            plt.xticks(rotation=90)
 
         ax.bar(classes_histogram_df['class'], classes_histogram_df['num_samples'])
-        plt.xticks(rotation=90)
 
     if show_table:
         classes_histogram_df.set_index(['label', 'class'], inplace=True)
@@ -97,11 +97,11 @@ def bucket_indices(indices, cuts):
 
 class DataSet(object):
 
-    def __init__(self, validation_proportion=None, labels_names=None, feature_names=None, exact=True,
+    def __init__(self, validation_proportion=None, labels_names=None, features_names=None, exact=True,
                  inputs_key=0, labels_key=1, **kwargs):
         self.validation_proportion = validation_proportion
         self._labels_names = labels_names
-        self._feature_names = feature_names
+        self._features_names = features_names
         self.exact = exact
         self.inputs_key = inputs_key
         self.labels_key = labels_key
@@ -143,7 +143,7 @@ class DataSet(object):
 
     @property
     def features_names(self):
-        return self._feature_names if self._feature_names is not None \
+        return self._features_names if self._features_names is not None \
                else [str(feature) for feature in range(self.num_features)]
 
     @property
@@ -176,24 +176,30 @@ class DataSet(object):
         # If the sample is a sequence then return the length of the first step.
         return len(sample_inputs if len(sample_inputs.shape) == 1 else sample_inputs[0])
 
-    def provide_train_validation_random_partition(self, validation_proportion=None, exact=None):
+    def provide_train_validation_partition(self, validation_proportion=None, exact=None):
         return divide_inputs_labels_set_randomly(self.train_inputs, self.train_labels,
                                                  validation_proportion or self.validation_proportion,
                                                  exact or self.exact)
 
-    def get_sample(self, return_sample_index=False):
-        return sample_input_label(self.inputs, self.labels, return_sample_index=False)
+    def get_sample(self, return_sample_index=False, return_sample_input=True):
+        return sample_input_label(self.inputs if return_sample_input else self.labels,
+                                  self.labels if return_sample_input else None,
+                                  return_sample_index=return_sample_index)
 
-    def get_train_sample(self, return_sample_index=False):
-        return sample_input_label(self.train_inputs, self.train_labels, return_sample_index=False)
+    def get_train_sample(self, return_sample_index=False, return_sample_input=True):
+        return sample_input_label(self.train_inputs if return_sample_input else self.train_labels,
+                                  self.train_labels if return_sample_input else None,
+                                  return_sample_index=return_sample_index)
 
-    def get_test_sample(self):
-        return sample_input_label(self.test_inputs, self.test_labels, return_sample_index=False)
+    def get_test_sample(self, return_sample_index=False, return_sample_input=True):
+        return sample_input_label(self.test_inputs if return_sample_input else self.test_labels,
+                                  self.test_labels if return_sample_input else None,
+                                  return_sample_index=return_sample_index)
 
-    def classes_distribution(self, show_chart=True):
-        classes_histogram_df, ax = dataset_class_distribution(self.labels, self._labels_names)
-        ax.set_title('Dataset classes distribution')
-        if show_chart:
+    def classes_distribution(self, ax=None):
+        classes_histogram_df, _ax = dataset_class_distribution(self.labels, self.labels_names, ax=ax)
+        if ax is None:
+            _ax.set_title('Dataset classes distribution')
             import matplotlib.pyplot as plt
             plt.show()
 
@@ -205,14 +211,14 @@ class DataSet(object):
 
         _, (train_dataset_classes_ax, test_dataset_classes_ax) = plt.subplots(1, 2, figsize=(16, 10), sharey=True)
 
-        train_samples_histogram_df, _ = dataset_class_distribution(self.train_labels, self._labels_names,
+        train_samples_histogram_df, _ = dataset_class_distribution(self.train_labels, self.labels_names,
                                                                    show_table=False,
                                                                    ax=train_dataset_classes_ax)
         plt.sca(train_dataset_classes_ax)
         plt.xticks(rotation=-90)
         train_dataset_classes_ax.set_title('Train dataset classes distribution')
 
-        test_samples_histogram_df, _ = dataset_class_distribution(self.test_labels, self._labels_names,
+        test_samples_histogram_df, _ = dataset_class_distribution(self.test_labels, self.labels_names,
                                                                   show_table=False,
                                                                   ax=test_dataset_classes_ax)
 
@@ -254,37 +260,21 @@ class DataSet(object):
         self.modify_classes_distribution(classes_num_samples_to_vary)
 
     def modify_classes_distribution(self, classes_num_samples_to_vary):
-        test_proportion = self.test_proportion
+        self.remove_samples(np.concatenate(self.samples_by_labels([(class_label, abs(frequency_change_requested))
+                                                                   for class_label, frequency_change_requested
+                                                                   in enumerate(classes_num_samples_to_vary)
+                                                                   if frequency_change_requested < 0],
+                                                                  return_samples_indices=True,
+                                                                  return_samples_inputs=False)))
 
-        inputs_to_add = []
-        labels_to_add = []
-        samples_indices_to_remove = []
-        adds_and_removals_to_do = np.sum(np.apply_along_axis(abs, 0, classes_num_samples_to_vary))
-        while any([num_missing_samples != 0 for num_missing_samples in classes_num_samples_to_vary]):
-            sample_from_test = random_choice(test_proportion)
-            class_input, \
-            class_label, \
-            sample_index = sample_input_label(self.test_inputs if sample_from_test else self.train_inputs,
-                                              self.test_labels if sample_from_test else self.train_labels,
-                                              return_sample_index=True)
-
-            if classes_num_samples_to_vary[class_label] > 0:
-                inputs_to_add.append(class_input)
-                labels_to_add.append(class_label)
-                classes_num_samples_to_vary[class_label] -= 1
-            else:
-                if classes_num_samples_to_vary[class_label] < 0:
-                    samples_indices_to_remove.append(sample_index)
-                    classes_num_samples_to_vary[class_label] += 1
-            progress = float(np.sum(np.apply_along_axis(abs, 0, classes_num_samples_to_vary))) / adds_and_removals_to_do
-            progress = (1 - progress) * 100
-            if int(progress) % 10 == 0:
-                logging.info('Modifiying dataset distribution: {progress}% progress.'.format(progress=progress))
-
-        if len(inputs_to_add) > 0 and len(labels_to_add) > 0:
-            self.add_samples(np.array(inputs_to_add), np.array(labels_to_add))
-        if len(samples_indices_to_remove) > 0:
-            self.remove_samples(samples_indices_to_remove)
+        samples_to_repeat_indices = self.samples_by_labels([(class_label, abs(frequency_change_requested))
+                                                    for class_label, frequency_change_requested
+                                                    in enumerate(classes_num_samples_to_vary)
+                                                    if frequency_change_requested > 0],
+                                                    return_samples_indices=True,
+                                                    return_samples_inputs=False)
+        self.add_samples(DataSubSet(self, inputs_key=self.inputs_key, data_indices=samples_to_repeat_indices),
+                         DataSubSet(self, inputs_key=self.labels_key, data_indices=samples_to_repeat_indices))
 
     def blend_classes(self, classes_to_blend, blend_name=None):
         classes_to_blend = [self.labels_names.index(class_label) if isinstance(class_label, str) else class_label
@@ -298,14 +288,17 @@ class DataSet(object):
                 if class_shift > 0:
                     mapping.update({class_label: class_label - class_shift})
 
-        self.replace_labels(mapping)
+        self._replace_labels(mapping)
 
         blend_name = blend_name if blend_name is not None \
             else ' + '.join([self.labels_names[class_label] for class_label in classes_to_blend])
 
-        self._labels_names[blend_label] = blend_name
-        self._labels_names = [label_name for class_label, label_name in enumerate(self.labels_names)
-                            if class_label not in classes_to_blend or class_label == blend_label]
+        self.replace_labels_names(self.labels_names[:blend_label] + [blend_name] +
+                                  [class_name for class_label, class_name in enumerate(self.labels_names)
+                                   if class_label in mapping.keys() and class_label not in classes_to_blend])
+
+    def sample_at(self, key):
+        return self.inputs[key], self.labels[key]
 
     def __getitem__(self, key):
         if np.isscalar(key):
@@ -315,7 +308,7 @@ class DataSet(object):
                 if key[1] == self.labels_key:
                     return self.labels[key[0]]
                 if key[1] == self.inputs_key:
-                    return self.inputs
+                    return self.inputs[key[0]]
 
     def add_samples(self, inputs_to_add, labels_to_add, **kwargs):
         pass
@@ -323,8 +316,73 @@ class DataSet(object):
     def remove_samples(self, samples_indices):
         pass
 
-    def replace_labels(self, mapping):
+    def replace_labels(self, class_label_mapping, prevent_former_labels_collision=True):
+        mapping = {(self.labels_names.index(former_label) if isinstance(former_label, str) else former_label): new_label
+                   for former_label, new_label in class_label_mapping.items()}
+
+        if prevent_former_labels_collision:
+            former_labels_mapping = {}
+            for former_label in class_label_mapping.values():
+                if former_label not in former_labels_mapping:
+                    references = [new_label for new_label, old_label in mapping.items() if old_label == former_label]
+                    former_labels_mapping.update({former_label: min(references)})
+
+            mapping.update(former_labels_mapping)
+
+        self._replace_labels(mapping)
+
+    def _replace_labels(self, mapping, samples_indices=None):
         pass
+
+    def replace_labels_names(self, new_labels_names):
+        self._labels_names = new_labels_names
+
+    def samples_by_labels(self, classes_samples_requested, return_samples_indices=False, return_samples_inputs=True):
+        ''' class_samples_requested is expected to be a list of tuples or strings like
+            [(class1, class1_required_samples), class2, ...]'''
+        classes_samples_requested = [class_samples_requested if isinstance(class_samples_requested, (list, tuple))
+                                     else (class_samples_requested, None)
+                                     for class_samples_requested in classes_samples_requested]
+
+        classes_samples_requested = [[self.labels_names.index(class_label) if isinstance(class_label, str)
+                                      else class_label, requested_samples]
+                                     for class_label, requested_samples in classes_samples_requested]
+        classes_to_sample_labels = [class_label for class_label, requested_samples in classes_samples_requested]
+
+        samples_indices_by_labels = [[] for class_label in range(len(classes_samples_requested))]
+
+        shuffled_sample_indices = list(range(self.num_samples))
+        import random
+        random.shuffle(shuffled_sample_indices)
+        shuffled_sample_index = 0
+        while (shuffled_sample_index < len(shuffled_sample_indices)
+          and any([requested_samples != 0 for class_label, requested_samples in classes_samples_requested])):
+
+            true_sample_index = shuffled_sample_indices[shuffled_sample_index]
+            sample_label = self.labels[true_sample_index]
+            shuffled_sample_index += 1
+            if sample_label in classes_to_sample_labels:
+                samples_indices_by_labels[classes_to_sample_labels.index(sample_label)].append(true_sample_index)
+
+                sample_class_label, sample_class_requested_samples = \
+                    classes_samples_requested[classes_to_sample_labels.index(sample_label)]
+
+                if sample_class_requested_samples is not None:
+                    if sample_class_requested_samples > 0:
+                        classes_samples_requested[classes_to_sample_labels.index(sample_label)][1] -= 1
+                    elif sample_class_requested_samples < 0:
+                        classes_samples_requested[classes_to_sample_labels.index(sample_label)][1] += 1
+
+        if return_samples_inputs:
+            samples_by_label = [[[],[]] * len(classes_samples_requested)]
+            for label_index, label in enumerate(classes_samples_requested):
+                class_samples_inputs = np.array(self[samples_indices_by_labels[label_index]])[:, 0]
+                class_samples_labels = np.repeat(label, len(class_samples_inputs))
+                samples_by_label[label_index] = class_samples_inputs, class_samples_labels
+
+            return (samples_by_label, samples_indices_by_labels) if return_samples_indices else samples_by_label
+        else:
+            return samples_indices_by_labels
 
 
 class ArrayDataSet(DataSet):
@@ -388,9 +446,23 @@ class ArrayDataSet(DataSet):
         self._test_inputs = np.delete(self._test_inputs, test_samples, 0)
         self._test_labels = np.delete(self._test_labels, test_samples, 0)
 
-    def replace_labels(self, mapping):
-        self._train_labels = np.array([mapping.get(label, label) for label in self._train_labels])
-        self._test_labels = np.array([mapping.get(label, label) for label in self._test_labels])
+    def _replace_labels(self, mapping, samples_indices=None):
+        if samples_indices is None:
+            self._train_labels = np.array([mapping.get(label, label) for label in self._train_labels])
+            self._test_labels = np.array([mapping.get(label, label) for label in self._test_labels])
+        else:
+            train_indices_to_affect = []
+            test_indices_to_affect = []
+            for sample_index in samples_indices:
+                if sample_index < self.num_train_samples:
+                    train_indices_to_affect.append(sample_index)
+                else:
+                    test_indices_to_affect.append(sample_index)
+                    
+            self._train_labels = np.array([mapping.get(label, label) if index in train_indices_to_affect else label
+                                           for index, label in enumerate(self._train_labels)])
+            self._test_labels = np.array([mapping.get(label, label) if index in test_indices_to_affect else label
+                                           for index, label in enumerate(self._test_labels)])
 
 
 class DataFrameDataSet(DataSet):
@@ -507,24 +579,33 @@ class SequentialDataSet(DataSet):
             plt.show()
 
 
-class PartialDataSet(DataSet):
+class DataSubSet(DataSet):
     """Class that wraps a DataSet in order to retrieve only part of it, reusing its main functionality.
        This is particularly useful to retrieve inputs or labels separately in order to build an ArrayDataSet."""
 
-    def __init__(self, complete_data_set, data_key, **kwargs):
+    def __init__(self, complete_data_set, data_key=slice(None, None, None), data_indices=None, **kwargs):
         self.data_key = data_key
+        self.data_indices = data_indices if data_indices is not None else list(range(len(complete_data_set)))
         self.complete_data_set = complete_data_set
         super().__init__(**kwargs)
 
     def __getitem__(self, key):
-        return self.complete_data_set[key][self.data_key]
+        return self.complete_data_set[self.data_indices[key]][self.data_key]
 
     def tolist(self):
-        return self.complete_data_set[:, self.data_key]
+        return self.complete_data_set[self.data_indices, self.data_key]
+
+    @property
+    def inputs(self):
+        return self.complete_data_set.inputs[self.data_indices]
+
+    @property
+    def labels(self):
+        return self.complete_data_set.labels[self.data_indices]
 
     @property
     def num_samples(self):
-        return self.complete_data_set.num_samples
+        return len(self.data_indices)
 
     @property
     def num_features(self):
@@ -534,18 +615,27 @@ class PartialDataSet(DataSet):
     def num_classes(self):
         return self.complete_data_set.num_classes
 
+    @property
+    def labels_names(self):
+        return self._labels_names if self._labels_names is not None else self.complete_data_set.labels_names
 
-class PartialSequentialDataSet(PartialDataSet, SequentialDataSet):
+    @property
+    def features_names(self):
+        return self._features_names if self._features_names is not None else self.complete_data_set.features_names
+
+    def _replace_labels(self, mapping, samples_indices=None):
+        samples_indices = self.data_indices if samples_indices is None else list(set(samples_indices) &
+                                                                                 set(self.data_key))
+        self.complete_data_set._replace_labels(mapping, samples_indices)
+
+
+class SequentialDataSubSet(DataSubSet, SequentialDataSet):
     """Class that wraps a SequentialDataSet in order to retrieve only part of it, reusing its main functionality.
        This is particularly useful to retrieve inputs or labels separately to build an ArrayDataSet."""
 
     @property
     def steps_per_sample(self):
         return self.complete_data_set.steps_per_sample
-
-
-def data_partition(data_sets, key):
-    return DataSetsMerge([data_set[:, key] for data_set in data_sets])
 
 
 def coarse_subsets_partition(subsets, ratio, shuffle=True):
@@ -569,84 +659,74 @@ def coarse_subsets_partition(subsets, ratio, shuffle=True):
 
 class DataSetsMerge(DataSet):
 
-    def __init__(self, data_sets, test_proportion=0., **kwargs):
-        train_sequences_sets, test_sequences_sets = coarse_subsets_partition(data_sets, 1 - test_proportion)
-        self.num_train_data_sets = len(train_sequences_sets)
-        self.data_sets = train_sequences_sets + test_sequences_sets
+    def __init__(self, data_sets, test_proportion=0., shuffle=False, **kwargs):
         super().__init__(**kwargs)
-
-    def provide_exact_merge(self):
-        return ArrayDataSet(inputs=PartialDataSet(self, self.inputs_key),
-                            labels=PartialDataSet(self, self.labels_key),
-                            test_proportion=self.test_proportion,
-                            labels_names=self.labels_names,
-                            feature_names=self.features_names,
-                            inputs_key=self.data_sets[0].inputs_key,
-                            labels_key=self.data_sets[0].labels_key)
+        data_sets_samples_indices = np.expand_dims(np.array(range(sum([len(data_set) for data_set in data_sets]))), 0)
+        train_samples_indices, test_samples_indices = coarse_subsets_partition(data_sets_samples_indices,
+                                                                               1 - test_proportion,
+                                                                               shuffle=shuffle)
+        self.data_sets = data_sets
+        self._train_inputs = DataSubSet(self, self.inputs_key, train_samples_indices)
+        self._train_labels = DataSubSet(self, self.labels_key, train_samples_indices)
+        self._test_labels = DataSubSet(self, self.labels_key, test_samples_indices)
+        self._test_inputs = DataSubSet(self, self.inputs_key, test_samples_indices)
 
     @property
     def labels_names(self):
-        return self.data_sets[0].labels_names
+        return self._labels_names if self._labels_names is not None else self.data_sets[0].labels_names
 
     @property
     def features_names(self):
-        return self.data_sets[0].features_names
+        return self._features_names if self._features_names is not None else self.data_sets[0].features_names
 
     @property
     def inputs(self):
-        return data_partition(self.data_sets, self.inputs_key)
+        return DataSubSet(self, self.inputs_key)
 
     @property
     def labels(self):
-        return data_partition(self.data_sets, self.labels_key)
+        return np.concatenate([data_set.labels for data_set in self.data_sets])
 
     @property
     def train_inputs(self):
-        return data_partition(self.data_sets[:self.num_train_data_sets], self.inputs_key)
+        return self._train_inputs
 
     @property
     def train_labels(self):
-        return data_partition(self.data_sets[:self.num_train_data_sets], self.labels_key)
+        labels = self.labels
+        return np.array([labels[index] for index in self._train_labels.data_indices])
 
     @property
     def test_inputs(self):
-        return data_partition(self.data_sets[self.num_train_data_sets:], self.inputs_key)
+        return self._test_inputs
 
     @property
     def test_labels(self):
-        return data_partition(self.data_sets[self.num_train_data_sets:], self.labels_key)
+        labels = self.labels
+        return np.array([labels[index] for index in self._test_labels.data_indices])
 
-    def provide_train_validation_random_partition(self, validation_proportion=None):
-        '''For training and validating by bootstraping(sampling with repetitions).'''
+    def provide_train_validation_partition(self, k_fold=None, validation_proportion=None):
+        '''For training and validating by crossvalidation which requires to define the requested k_fold
+        or by bootstraping(sampling with repetitions).'''
         validation_proportion = validation_proportion or self.validation_proportion
 
-        train_sequence_sets = self.data_sets[:self.num_train_data_sets]
+        train_samples_indices = self.train_inputs.data_indices
+        if k_fold is None:
+            k_fold = k_fold % (1 // validation_proportion)
+            validation_fold_length = validation_proportion * len(train_samples_indices)
+            validation_fold_offset = validation_proportion * len(train_samples_indices) * k_fold
+            validation_samples_indices_fold = \
+                train_samples_indices[validation_fold_offset:validation_fold_offset + validation_fold_length]
+            train_samples_indices_fold = [index for index in train_samples_indices 
+                                          if index not in validation_samples_indices_fold]
+        else:
+            train_samples_indices_fold, validation_samples_indices_fold = divide_set_randomly(train_samples_indices,
+                                                                                              validation_proportion)
 
-        train_fold, validation_fold = divide_set_randomly(train_sequence_sets, validation_proportion)
-
-        train_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
-                                           for data_set in train_fold],
-                                          test_proportion=0, validation_proportion=0,
-                                          labels_names=self.labels_names, exact_merge=False,
-                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
-        train_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
-                                           for data_set in train_fold],
-                                          test_proportion=1, validation_proportion=0,
-                                          labels_names=self.labels_names, exact_merge=False,
-                                          inputs_key=self.inputs_key, labels_key=self.labels_key)
-
-        validation_fold_inputs = DataSetsMerge([data_set[:, self.inputs_key]
-                                                for data_set in validation_fold],
-                                               test_proportion=0, validation_proportion=1,
-                                               labels_names=self.labels_names, exact_merge=False,
-                                               inputs_key=self.inputs_key, labels_key=self.labels_key)
-        validation_fold_labels = DataSetsMerge([data_set[:, self.labels_key]
-                                                for data_set in validation_fold],
-                                               test_proportion=1, validation_proportion=1,
-                                               labels_names=self.labels_names, exact_merge=False,
-                                               inputs_key=self.inputs_key, labels_key=self.labels_key)
-
-        return train_fold_inputs, validation_fold_inputs, train_fold_labels, validation_fold_labels
+        return DataSubSet(self.train_inputs, self.inputs_key, train_samples_indices_fold), \
+               DataSubSet(self.train_inputs, self.inputs_key, validation_samples_indices_fold), \
+               DataSubSet(self.train_labels, self.labels_key, train_samples_indices_fold), \
+               DataSubSet(self.train_labels, self.labels_key, validation_samples_indices_fold)
 
     @property
     def num_samples(self):
@@ -654,15 +734,11 @@ class DataSetsMerge(DataSet):
 
     @property
     def num_train_samples(self):
-        return sum([data_set.num_samples
-                    for data_set
-                    in self.data_sets[:self.num_train_data_sets]])
+        return len(self._train_inputs)
 
     @property
     def num_test_samples(self):
-        return sum([data_set.num_samples
-                    for data_set
-                    in self.data_sets[self.num_train_data_sets:]])
+        return len(self._test_inputs)
 
     @property
     def num_features(self):
@@ -687,12 +763,6 @@ class DataSetsMerge(DataSet):
         else:
             raise IndexError('Requested sample at {} is out of bounds.'.format(index))
 
-    def __getitem__(self, key):
-        if np.isscalar(key):
-            return self.sample_at(key)
-        else:
-            return [self.sample_at(index) for index in np.array(range(self.num_samples))[key]]
-
     def get_sample(self, return_sample_index=False):
         import random
         sample_index = random.randint(0, self.num_samples)
@@ -715,14 +785,25 @@ class DataSetsMerge(DataSet):
     def remove_samples(self, samples_indices):
         cumulative_data_sets_length = np.cumsum([len(data_set) for data_set in self.data_sets])
         data_sets_samples = bucket_indices(samples_indices, cumulative_data_sets_length)
-        for data_set, data_set_offset, samples_indices_to_remove in zip(self.data_sets,
-                                                                        [0] + cumulative_data_sets_length[:-1].tolist(),
-                                                                        data_sets_samples):
+        offsets = [0] + cumulative_data_sets_length[:-1].tolist()
+        for data_set, data_set_offset, samples_indices_to_remove in zip(self.data_sets, offsets, data_sets_samples):
             data_set.remove_samples(np.array(samples_indices_to_remove) - data_set_offset)
 
-    def replace_labels(self, mapping):
+    def _replace_labels(self, mapping, samples_indices=None):
+        if samples_indices is None:
+            for data_set in self.data_sets:
+                data_set._replace_labels(mapping, samples_indices=None)
+        else:
+            cumulative_data_sets_length = np.cumsum([len(data_set) for data_set in self.data_sets])
+            data_sets_samples = bucket_indices(samples_indices, cumulative_data_sets_length)
+            offsets = [0] + cumulative_data_sets_length[:-1].tolist()
+            for data_set, data_set_offset, samples_indices_to_remove in zip(self.data_sets, offsets, data_sets_samples):
+                data_set._replace_labels(mapping, np.array(samples_indices_to_remove) - data_set_offset)
+
+    def replace_labels_names(self, new_labels_names):
+        super().replace_labels_names(new_labels_names)
         for data_set in self.data_sets:
-            data_set.replace_labels(mapping)
+            data_set.replace_labels_names(new_labels_names)
 
 
 class SequentialDataSetsMerge(DataSetsMerge, SequentialDataSet):
@@ -749,8 +830,10 @@ class EpochEegExperimentDataSet(SequentialDataSet):
         self.valid_samples = self.validate_samples(self.signal_classification)
         self.transformation = transformation if not isinstance(transformation, str) \
             else self._build_transformation(transformation)
+        import mne
+        self.picks = mne.pick_types(self.eeg_signals.info, eeg=True, eog=False, emg=False, stim=False)
 
-    def validate_samples(self, signal_classification, labels_mapping={}):
+    def validate_samples(self, signal_classification, labels_mapping={}, mapping_indices=None):
         # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
         return np.array([(onset, labels_mapping.get(label, label))
                          for onset_index, (onset, label) in enumerate(signal_classification)
@@ -773,8 +856,8 @@ class EpochEegExperimentDataSet(SequentialDataSet):
     def eeg_signals(self):
         import mne
         set_filename = list_folder_files_with_extension(self.files_folder_path, 'set')[0]
-        raw_eeglab = mne.io.read_raw_eeglab(input_fname=set_filename, preload=False, stim_channel=False, eog='auto')
-        return raw_eeglab.pick_types(eeg=True, eog=False, emg=False, stim=False)
+        complete_experiment_recording = mne.io.read_raw_eeglab(input_fname=set_filename, preload=False, eog='auto')
+        return complete_experiment_recording
 
     @property
     def signal_classification(self):
@@ -790,13 +873,12 @@ class EpochEegExperimentDataSet(SequentialDataSet):
 
     @property
     def num_features(self):
-        import mne
-        return len(mne.pick_types(self.eeg_signals.info, eeg=True, eog=False, emg=False, stim=False))
+        return len(self.picks)
 
     @property
     def features_names(self):
         # Omit stim channel
-        return self.eeg_signals.ch_names
+        return np.array(self.eeg_signals.ch_names)[self.picks]
 
     @property
     def num_classes(self):
@@ -814,7 +896,7 @@ class EpochEegExperimentDataSet(SequentialDataSet):
 
     @property
     def inputs(self):
-        return PartialDataSet(data_key=self.inputs_key, complete_data_set=self)
+        return DataSubSet(data_key=self.inputs_key, complete_data_set=self)
 
     @property
     def labels(self):
@@ -822,13 +904,19 @@ class EpochEegExperimentDataSet(SequentialDataSet):
 
     def sample_at(self, index):
         onset, label = self.valid_samples[index]
-        return self._transform_raw_signal_data(self.eeg_signals[:, onset:onset + self.steps_per_sample][0]), label
+        inputs = self._transform_raw_signal_data(self.eeg_signals[self.picks, onset:onset + self.steps_per_sample][0])
+        return inputs, label
 
     def remove_samples(self, samples_indices):
         self.valid_samples = np.delete(self.valid_samples, samples_indices, 0)
 
-    def replace_labels(self, mapping):
-        self.valid_samples = self.validate_samples(self.signal_classification, mapping)
+    def _replace_labels(self, mapping, samples_indices=None):
+        if samples_indices is None:
+            self.valid_samples = np.array([(onset, mapping.get(label, label))
+                                           for onset, label in self.valid_samples])
+        else:
+            self.valid_samples = np.array([(onset, mapping.get(label, label) if index in samples_indices else label)
+                                           for index, (onset, label) in enumerate(self.valid_samples)])
 
 
 class FmedLfaEegExperimentData(EpochEegExperimentDataSet):
@@ -855,5 +943,5 @@ class FmedLfaExperimentDataSet(SequentialDataSetsMerge):
         super().__init__(eeg_experiments_data,
                          inputs_key=eeg_experiments_data[0].inputs_key,
                          labels_key=eeg_experiments_data[0].labels_key,
-                         feature_names=eeg_experiments_data[0].features_names,
+                         features_names=eeg_experiments_data[0].features_names,
                          **kwargs)
