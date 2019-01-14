@@ -643,8 +643,7 @@ def coarse_subsets_partition(subsets, ratio, shuffle=True):
         if shuffle:
             import random
             random.shuffle(subsets)
-        subsets_lengths = [len(subset) for subset in subsets]
-        subsets_cumulative_lengths = np.cumsum(subsets_lengths)
+        subsets_cumulative_lengths = np.cumsum([len(subset) for subset in subsets])
         total_length = subsets_cumulative_lengths[-1]
         cut_index = min(*([index for index, cumulative_length in enumerate(subsets_cumulative_lengths)
                            if cumulative_length > (total_length * ratio)] + [len(subsets_cumulative_lengths) - 1]))
@@ -661,7 +660,7 @@ class DataSetsMerge(DataSet):
 
     def __init__(self, data_sets, test_proportion=0., shuffle=False, **kwargs):
         super().__init__(**kwargs)
-        data_sets_samples_indices = np.expand_dims(np.array(range(sum([len(data_set) for data_set in data_sets]))), 0)
+        data_sets_samples_indices = np.expand_dims(np.array(range(sum([len(data_set) for data_set in data_sets]))), 0).T
         train_samples_indices, test_samples_indices = coarse_subsets_partition(data_sets_samples_indices,
                                                                                1 - test_proportion,
                                                                                shuffle=shuffle)
