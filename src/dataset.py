@@ -664,6 +664,8 @@ class DataSetsMerge(DataSet):
         train_samples_indices, test_samples_indices = coarse_subsets_partition(data_sets_samples_indices,
                                                                                1 - test_proportion,
                                                                                shuffle=shuffle)
+        train_samples_indices = np.array(train_samples_indices).flatten()
+        test_samples_indices = np.array(test_samples_indices).flatten()
         self.data_sets = data_sets
         self._train_inputs = DataSubSet(self, self.inputs_key, train_samples_indices)
         self._train_labels = DataSubSet(self, self.labels_key, train_samples_indices)
