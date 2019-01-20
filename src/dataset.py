@@ -583,14 +583,15 @@ class DataSubSet(DataSet):
     """Class that wraps a DataSet in order to retrieve only part of it, reusing its main functionality.
        This is particularly useful to retrieve inputs or labels separately in order to build an ArrayDataSet."""
 
-    def __init__(self, complete_data_set, data_key=slice(None, None, None), data_indices=None, **kwargs):
+    def __init__(self, complete_data_set, data_key=None, data_indices=None, **kwargs):
         self.data_key = data_key
         self.data_indices = data_indices if data_indices is not None else list(range(len(complete_data_set)))
         self.complete_data_set = complete_data_set
         super().__init__(**kwargs)
 
     def __getitem__(self, key):
-        return self.complete_data_set[self.data_indices[key]][self.data_key]
+        full_data = self.complete_data_set[self.data_indices[key]]
+        return full_data[self.data_key] if self.data_key is not None else full_data
 
     def tolist(self):
         return self.complete_data_set[self.data_indices, self.data_key]
@@ -640,9 +641,9 @@ class SequentialDataSubSet(DataSubSet, SequentialDataSet):
 
 def coarse_subsets_partition(subsets, ratio, shuffle=True):
     if ratio not in (0, 1, None):
+        subsets = np.array(subsets)
         if shuffle:
-            import random
-            random.shuffle(subsets)
+            np.random.shuffle(subsets)
         subsets_cumulative_lengths = np.cumsum([len(subset) for subset in subsets])
         total_length = subsets_cumulative_lengths[-1]
         cut_index = min(*([index for index, cumulative_length in enumerate(subsets_cumulative_lengths)
@@ -724,10 +725,10 @@ class DataSetsMerge(DataSet):
             train_samples_indices_fold, validation_samples_indices_fold = divide_set_randomly(train_samples_indices,
                                                                                               validation_proportion)
 
-        return DataSubSet(self.train_inputs, self.inputs_key, train_samples_indices_fold), \
-               DataSubSet(self.train_inputs, self.inputs_key, validation_samples_indices_fold), \
-               DataSubSet(self.train_labels, self.labels_key, train_samples_indices_fold), \
-               DataSubSet(self.train_labels, self.labels_key, validation_samples_indices_fold)
+        return DataSubSet(self.train_inputs, data_indices=train_samples_indices_fold), \
+               DataSubSet(self.train_inputs, data_indices=validation_samples_indices_fold), \
+               DataSubSet(self.train_labels, data_indices=train_samples_indices_fold), \
+               DataSubSet(self.train_labels, data_indices=validation_samples_indices_fold)
 
     @property
     def num_samples(self):
