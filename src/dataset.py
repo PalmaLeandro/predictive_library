@@ -719,16 +719,16 @@ class DataSetsMerge(DataSet):
             validation_fold_offset = validation_proportion * len(train_samples_indices) * k_fold
             validation_samples_indices_fold = \
                 train_samples_indices[validation_fold_offset:validation_fold_offset + validation_fold_length]
-            train_samples_indices_fold = [index for index in train_samples_indices 
+            train_samples_indices_fold = [index for index in train_samples_indices
                                           if index not in validation_samples_indices_fold]
         else:
             train_samples_indices_fold, validation_samples_indices_fold = divide_set_randomly(train_samples_indices,
                                                                                               validation_proportion)
 
-        return DataSubSet(self.train_inputs, data_indices=train_samples_indices_fold), \
-               DataSubSet(self.train_inputs, data_indices=validation_samples_indices_fold), \
-               DataSubSet(self.train_labels, data_indices=train_samples_indices_fold), \
-               DataSubSet(self.train_labels, data_indices=validation_samples_indices_fold)
+        return DataSubSet(self, data_key=self.inputs_key, data_indices=train_samples_indices_fold), \
+               DataSubSet(self, data_key=self.inputs_key, data_indices=validation_samples_indices_fold), \
+               DataSubSet(self, data_key=self.labels_key, data_indices=train_samples_indices_fold), \
+               DataSubSet(self, data_key=self.labels_key, data_indices=validation_samples_indices_fold)
 
     @property
     def num_samples(self):
