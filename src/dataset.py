@@ -71,16 +71,16 @@ def separate_samples_input_labels(samples, inputs_key=0, labels_key=1):
     inputs = []
     labels = []
     for sample in samples:
-        inputs.append(sample[0])
-        labels.append(sample[1])
+        inputs.append(sample[inputs_key])
+        labels.append(sample[labels_key])
 
     return inputs, labels
 
 
 def divide_inputs_labels_set_randomly(inputs, labels, shutter_proportion, exact=False, inputs_key=0, labels_key=1):
     A_set, B_set = divide_set_randomly(unify_inputs_labels_samples(inputs, labels), shutter_proportion, exact)
-    A_set_inputs, A_set_labels = separate_samples_input_labels(A_set, inputs_key=0, labels_key=1)
-    B_set_inputs, B_set_labels = separate_samples_input_labels(B_set, inputs_key=0, labels_key=1)
+    A_set_inputs, A_set_labels = separate_samples_input_labels(A_set, inputs_key=inputs_key, labels_key=labels_key)
+    B_set_inputs, B_set_labels = separate_samples_input_labels(B_set, inputs_key=inputs_key, labels_key=labels_key)
     return A_set_inputs, B_set_inputs, A_set_labels, B_set_labels
 
 
@@ -91,7 +91,7 @@ def random_choice(probability_of_success):
 def bucket_indices(indices, cuts):
     buckets = [[] for bucket in range(len(cuts) + 1)]
     for index in indices:
-        buckets[min([cut_index for cut_index, cut in enumerate(cuts) if index < cut])].append(index)
+        buckets[min([cut_index for cut_index, cut in enumerate(cuts) if index < cut] + [len(cuts)])].append(index)
     return buckets
 
 
@@ -467,27 +467,27 @@ class ArrayDataSet(DataSet):
 
 class DataFrameDataSet(DataSet):
 
-    def __init__(self, dataset_df, sample_field=None, step_field=None, label_field=None,
+    def __init__(self, data_set_df, sample_field=None, step_field=None, label_field=None,
                  test_proportion=None, validation_proportion=None, labels_names=None, **kwargs):
 
-        if sample_field is not None and sample_field in dataset_df.columns and \
-                label_field is not None and label_field in dataset_df.columns:
-            num_samples = dataset_df[sample_field].nunique()
+        if sample_field is not None and sample_field in data_set_df.columns and \
+                label_field is not None and label_field in data_set_df.columns:
+            num_samples = data_set_df[sample_field].nunique()
 
-            labels = dataset_df[[sample_field,
-                                 label_field]].drop_duplicates().set_index(sample_field)[label_field].values
+            labels = data_set_df[[sample_field,
+                                  label_field]].drop_duplicates().set_index(sample_field)[label_field].values
 
-            if step_field is not None and step_field in dataset_df.columns.tolist():
+            if step_field is not None and step_field in data_set_df.columns.tolist():
                 # Treatment for sequential datasets.
-                sequence_length_is_constant = (dataset_df[step_field].value_counts().tolist()[-1] ==
-                                               dataset_df[step_field].nunique())
+                sequence_length_is_constant = (data_set_df[step_field].value_counts().tolist()[-1] ==
+                                               data_set_df[step_field].nunique())
                 if sequence_length_is_constant:
-                    self.steps_per_sample = dataset_df[step_field].nunique()
-                    num_features = len([column for column in dataset_df.columns if column not in [sample_field,
-                                                                                                  step_field,
-                                                                                                  label_field]])
+                    self.steps_per_sample = data_set_df[step_field].nunique()
+                    num_features = len([column for column in data_set_df.columns if column not in [sample_field,
+                                                                                                   step_field,
+                                                                                                   label_field]])
 
-                    inputs = dataset_df.drop(label_field, axis=1).set_index([sample_field, step_field]).as_matrix() \
+                    inputs = data_set_df.drop(label_field, axis=1).set_index([sample_field, step_field]).as_matrix() \
                         .reshape([num_samples, self.steps_per_sample, num_features])
                 else:
                     self.steps_per_sample = None
@@ -495,30 +495,23 @@ class DataFrameDataSet(DataSet):
                                                            for column in sample_sequence_df.columns.tolist()
                                                            if not column in [sample_field, label_field]]].values
                                        for (sample, label), sample_sequence_df
-                                       in dataset_df.groupby([sample_field, label_field])])
+                                       in data_set_df.groupby([sample_field, label_field])])
             else:
                 self.steps_per_sample = None
-                inputs = dataset_df.drop(label_field, axis=1).set_index(sample_field).as_matrix()
+                inputs = data_set_df.drop(label_field, axis=1).set_index(sample_field).as_matrix()
 
         else:
             self.steps_per_sample = None
-            if label_field is not None and label_field in dataset_df.columns:
-                inputs = dataset_df.drop(label_field, axis=1).as_matrix()
-                labels = dataset_df[label_field].as_matrix()
+            if label_field is not None and label_field in data_set_df.columns:
+                inputs = data_set_df.drop(label_field, axis=1).as_matrix()
+                labels = data_set_df[label_field].as_matrix()
             else:
-                inputs = dataset_df.as_matrix()
+                inputs = data_set_df.as_matrix()
                 labels = np.array([])
 
         super().__init__(inputs, labels,
                          test_proportion=test_proportion, validation_proportion=validation_proportion,
                          labels_names=labels_names, **kwargs)
-
-
-class CSVDataSet(DataFrameDataSet):
-
-    def __init__(self, path_or_buffer, **kwargs):
-        import pandas as pd
-        super().__init__(pd.read_csv(path_or_buffer, **kwargs), **kwargs)
 
 
 def list_folder_files_with_extension(folder_path, extension):
@@ -577,6 +570,26 @@ class SequentialDataSet(DataSet):
 
         if axes is None:
             plt.show()
+
+    def class_cycles(self, class_label, return_samples_inputs=True, return_samples_indices=False):
+        [class_samples_indices] = self.samples_by_labels([class_label], return_samples_inputs=False,
+                                                         return_samples_indices=True)
+        class_samples_indices = sorted(class_samples_indices)
+        samples_between_class_labels = np.diff(class_samples_indices)
+        threshold = np.average(list(set(samples_between_class_labels) - {1}))
+        cuts_indices = [index for index, samples_until_next_class_label in enumerate(samples_between_class_labels)
+                        if samples_until_next_class_label > threshold]
+        cycles_cuts_samples_indices = np.array(class_samples_indices)[cuts_indices]
+        cycles_cuts_samples_indices += 1  # Otherwise would exclude de last sample of the cycle.
+        cycles_samples_indices = bucket_indices(class_samples_indices, cycles_cuts_samples_indices)
+        if return_samples_inputs:
+            cycles_data_sets = [SequentialDataSubSet(complete_data_set=self, data_indices=cycle_samples_indices)
+                                for cycle_samples_indices in cycles_samples_indices]
+            return (cycles_data_sets, cycles_samples_indices) if return_samples_indices else cycles_data_sets
+        if return_samples_indices:
+            return cycles_samples_indices
+
+        return len(cycles_cuts_samples_indices)
 
 
 class DataSubSet(DataSet):
@@ -822,7 +835,8 @@ class SequentialDataSetsMerge(DataSetsMerge, SequentialDataSet):
 class EpochEegExperimentDataSet(SequentialDataSet):
 
     def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None,
-                 transformation=None, **kwargs):
+                 transformation=None, mne_picks_types_args={'eeg': True, 'eog': False, 'emg': False, 'stim': False},
+                 mne_pick_channels_args=None, **kwargs):
         super().__init__(**kwargs)
         self.files_folder_path = files_folder_path
         self.epoch_duration = epoch_duration
@@ -830,12 +844,24 @@ class EpochEegExperimentDataSet(SequentialDataSet):
         self.high_frequencies_cut = high_frequencies_cut
 
         self.valid_samples = self.validate_samples(self.signal_classification)
+
+        import mne
+        eeg_signals = self.eeg_signals
+        self.picks = np.arange(len(eeg_signals.ch_names))
+
+        if mne_picks_types_args is not None:
+            pick_types_selection = mne.pick_types(eeg_signals.info, **mne_picks_types_args)
+            self.picks = np.array(list(filter(lambda channel_index: channel_index in pick_types_selection, self.picks)))
+
+        if mne_pick_channels_args is not None:
+            pick_channels_selection = mne.pick_channels(eeg_signals.ch_names, **mne_pick_channels_args)
+            self.picks = np.array(list(filter(lambda channel_index: channel_index in pick_channels_selection,
+                                              self.picks)))
+
         self.transformation = transformation if not isinstance(transformation, str) \
             else self._build_transformation(transformation)
-        import mne
-        self.picks = mne.pick_types(self.eeg_signals.info, eeg=True, eog=False, emg=False, stim=False)
 
-    def validate_samples(self, signal_classification, labels_mapping={}, mapping_indices=None):
+    def validate_samples(self, signal_classification, labels_mapping={}):
         # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
         return np.array([(onset, labels_mapping.get(label, label))
                          for onset_index, (onset, label) in enumerate(signal_classification)
@@ -938,10 +964,9 @@ class FmedLfaEegExperimentData(EpochEegExperimentDataSet):
 
 class FmedLfaExperimentDataSet(SequentialDataSetsMerge):
 
-    def __init__(self, experiments_data_folders, epoch_duration, **kwargs):
-        eeg_experiments_data = [FmedLfaEegExperimentData(experiments_data_folder, epoch_duration, **kwargs)
-                                for experiments_data_folder
-                                in experiments_data_folders]
+    def __init__(self, experiments_data, **kwargs):
+        eeg_experiments_data = [FmedLfaEegExperimentData(experiment_data, **kwargs) if isinstance(experiment_data, str)
+                                else experiment_data for experiment_data in experiments_data]
         super().__init__(eeg_experiments_data,
                          inputs_key=eeg_experiments_data[0].inputs_key,
                          labels_key=eeg_experiments_data[0].labels_key,
