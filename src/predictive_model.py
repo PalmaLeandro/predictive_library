@@ -579,11 +579,17 @@ class BatchSlice(PredictiveModel):
         return super().build_model(inputs[input_slice])
 
 
+class BatchSplit(PredictiveModel):
+
+    def build_model(self, inputs, splits, **kwargs):
+        return super().build_model(tf.split(inputs, num_or_size_splits=splits, axis=len(inputs.get_shape()) - 1))
+
+
 class BatchAggregation(PredictiveModel):
 
     def build_model(self, inputs, aggregation, dimensions=None, **kwargs):
         if dimensions is None:
-            # not_batch_dimensions_indexes:
+            # All but batch dimension indexes
             dimensions = [dimension_index for dimension_index in range(len(inputs.get_shape()))][1:]
         if aggregation == 'mean':
             return super().build_model(tf.reduce_mean(inputs, dimensions))
