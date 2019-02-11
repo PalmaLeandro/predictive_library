@@ -589,6 +589,19 @@ class BatchAggregation(PredictiveModel):
             return super().build_model(tf.reduce_mean(inputs, dimensions))
 
 
+class BatchSplitAggregation(PredictiveModel):
+
+    def build_model(self, inputs, splits_indices, aggregation, **kwargs):
+        splits_samples = np.diff([0] + sorted(splits_indices)).tolist()
+        if inputs.get_shape().dims[-1].value > sum(splits_samples):
+            splits_samples.append(-1)
+        input_splits = tf.split(inputs, splits_samples, axis=len(inputs.get_shape()) - 1)
+        if aggregation == 'mean':
+            aggregated_splits = [tf.expand_dims(tf.reduce_mean(input_split, axis=len(inputs.get_shape()) - 1), 2)
+                                 for input_split in input_splits]
+        return super().build_model(array_ops.concat(aggregated_splits, 2))
+
+
 class BatchNormalization(PredictiveModel):
 
     def build_model(self, inputs, dimensions=None, **kwargs):
