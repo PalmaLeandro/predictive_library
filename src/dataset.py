@@ -168,7 +168,7 @@ class DataSet(object):
     @property
     def num_classes(self):
         # Consider labels as indices being counted from zero.
-        return np.array(self.train_labels).max() + 1
+        return np.array(self.labels).max() + 1
 
     @property
     def num_features(self):
@@ -626,10 +626,6 @@ class DataSubSet(DataSet):
         return self.complete_data_set.num_features
 
     @property
-    def num_classes(self):
-        return self.complete_data_set.num_classes
-
-    @property
     def labels_names(self):
         return self._labels_names if self._labels_names is not None else self.complete_data_set.labels_names
 
@@ -910,7 +906,7 @@ class EpochEegExperimentDataSet(SequentialDataSet):
 
     @property
     def num_classes(self):
-        # Plus one since classes are considerated to be enumerated from 0.
+        # Plus one since classes are considered to be enumerated from 0.
         return np.array(self.valid_samples)[:, self.labels_key].max() + 1
 
     def _transform_raw_signal_data(self, raw_data):

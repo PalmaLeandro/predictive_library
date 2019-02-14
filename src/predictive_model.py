@@ -281,10 +281,10 @@ class DistribuibleProgram(object):
         # ps_process.start()
 
 
-class PredictiveModel(DistribuibleProgram):
+class PredictiveModel(object):
 
     def __init__(self, num_features=[None], batch_size=None, num_units=None,
-                 cluster_machines=[get_current_machine_ip() + ':0'],
+                 #cluster_machines=[get_current_machine_ip() + ':0'],
                  model_persistence_dir=None, erase_model_persistence_dir=True,
                  is_inner_model=False, **kwargs):
         if not is_inner_model:
@@ -441,10 +441,9 @@ class ClassificationModel(PredictiveModel):
 
     def build_loss(self, label, prediction, risk_function='mean_squared_error', **kwargs):
         if risk_function == 'cross_entropy':
-            return tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction,
-                                                                                 labels=label,
-                                                                                 name='cross_entropy'),
-                                  name='cross_entropy_mean')
+            batch_samples_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=prediction, labels=label,
+                                                                                name='cross_entropy')
+            return tf.reduce_mean(batch_samples_loss, name='cross_entropy_mean')
         else:
             return super().build_loss(label, prediction)
 
