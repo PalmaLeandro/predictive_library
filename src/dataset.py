@@ -337,7 +337,7 @@ class DataSet(object):
     def replace_labels_names(self, new_labels_names):
         self._labels_names = new_labels_names
 
-    def samples_by_labels(self, classes_samples_requested, return_samples_indices=False, return_samples_inputs=True):
+    def samples_by_labels(self, *classes_samples_requested, return_samples_indices=False, return_samples_inputs=True):
         ''' class_samples_requested is expected to be a list of tuples or strings like
             [(class1, class1_required_samples), class2, ...]'''
         classes_samples_requested = [class_samples_requested if isinstance(class_samples_requested, (list, tuple))
@@ -598,7 +598,7 @@ class DataSubSet(DataSet):
 
     def __init__(self, complete_data_set, data_key=None, data_indices=None, **kwargs):
         self.data_key = data_key
-        self.data_indices = data_indices if data_indices is not None else list(range(len(complete_data_set)))
+        self.data_indices = data_indices if data_indices is not None else list(range(len(complete_data_set) - 1))
         self.complete_data_set = complete_data_set
         super().__init__(**kwargs)
 
