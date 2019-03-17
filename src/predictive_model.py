@@ -281,6 +281,21 @@ class DistribuibleProgram(object):
         # ps_process.start()
 
 
+def validate_graph_arguments(arguments, fix_sequences_length_calculator=min):
+    for argument_name, argument_value in arguments.items():
+        if not np.isscalar(argument_value) and len(argument_value) > 0:
+            if not np.isscalar(argument_value[0]):
+                dimensions_valid_lengths = tuple(fix_sequences_length_calculator([sequence.shape[dimension_index]
+                                                                                  for sequence in argument_value])
+                                                 for dimension_index in range(len(argument_value[0].shape)))
+
+                for sequence in argument_value:
+                    if sequence.shape != dimensions_valid_lengths:
+                        sequence.resize(dimensions_valid_lengths, refcheck=False)
+
+    return arguments
+
+
 class PredictiveModel(object):
 
     def __init__(self, num_features=[None], batch_size=None, num_units=None,
@@ -302,14 +317,14 @@ class PredictiveModel(object):
                     self._batch_size = batch_size
                     self._global_step = tf.train.get_or_create_global_step()
 
-                    inputs = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
-                    label = tf.placeholder(dtype=tf.float32, shape=[None], name='label')
+                    self._inputs_plh = tf.placeholder(dtype=tf.float32, shape=[None, *num_features], name='inputs')
+                    self._label_plh = tf.placeholder(dtype=tf.float32, shape=[None], name='label')
 
                     self._do_nothing_op = tf.no_op()
-                    self._model_output_op = self.build_model(inputs, num_features=num_features, num_units=num_units,
-                                                             **kwargs)
+                    self._model_output_op = self.build_model(self._inputs_plh, num_features=num_features,
+                                                             num_units=num_units, **kwargs)
                     self._inference_op = self.build_inference(self._model_output_op, **kwargs)
-                    self._label_op = self.build_label(label, **kwargs)
+                    self._label_op = self.build_label(self._label_plh, **kwargs)
                     self._loss_op = self.build_loss(self._label_op, self._model_output_op, **kwargs)
                     self._summaries_op = self.build_summaries()
                     self._global_initializer = tf.global_variables_initializer()
@@ -364,7 +379,7 @@ class PredictiveModel(object):
                           **{'inputs:0': [inputs[sample] for sample in batch_samples],
                              'label:0': [labels[sample] for sample in batch_samples]}}
             result, loss_value, summaries = self._session.run([operation, self._loss_op, self._summaries_op],
-                                                              feed_dict=graph_args)
+                                                              feed_dict=validate_graph_arguments(graph_args))
 
             if persist_to_path is None:
                 results.append(result)
@@ -679,20 +694,18 @@ class TransformationPipeline(PredictiveModel):
 
     def build_model(self, inputs, inner_models, **kwargs):
         current_input = inputs
-        current_input_dimension = inputs.get_shape().dims[-1]
         self.inner_models_names = []
         # Instantiate every model using the provided arguments.
         for inner_model_index, (inner_model_class, inner_model_arguments) in enumerate(inner_models):
-            inner_model_arguments['num_features'] = current_input_dimension
+            inner_model_arguments['num_features'] = [dim.value for dim in current_input.get_shape().dims[1:]]
             inner_model = inner_model_class(is_inner_model=True, **inner_model_arguments)
             inner_model_name = inner_model.name + '_' + str(inner_model_index)
             with tf.variable_scope(inner_model_name):
                 current_input = inner_model.build_model(current_input, **inner_model_arguments)
-                current_input_dimension = [int(dimension) for dimension in current_input.get_shape().dims[1:]]
 
             self.inner_models_names.append(inner_model_name)
-
-        return super().build_model(current_input, **{**kwargs, 'num_units': current_input_dimension})
+        return super().build_model(current_input,
+                                   **{**kwargs, 'num_units': [dim.value for dim in current_input.get_shape().dims[1:]]})
 
     @property
     def parameters(self):

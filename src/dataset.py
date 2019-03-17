@@ -309,6 +309,7 @@ class DataSet(object):
                     return self.labels[key[0]]
                 if key[1] == self.inputs_key:
                     return self.inputs[key[0]]
+        return np.array([self.sample_at(index) for index in key])
 
     def add_samples(self, inputs_to_add, labels_to_add, **kwargs):
         pass
@@ -522,6 +523,10 @@ def list_folder_files_with_extension(folder_path, extension):
 
 class SequentialDataSet(DataSet):
 
+    def __init__(self, units_per_sample=1, **kwargs):
+        super().__init__(**kwargs)
+        self.units_per_sample = units_per_sample
+
     @property
     def num_samples(self):
         pass
@@ -531,16 +536,8 @@ class SequentialDataSet(DataSet):
         pass
 
     @property
-    def steps_per_sample(self):
-        pass
-
-    @property
-    def units_per_sample(self):
-        return 1
-
-    @property
     def shape(self):
-        return [self.num_samples, self.steps_per_sample, self.num_features]
+        return [self.num_samples, None, self.num_features]
 
     def plot_sample(self, sample=None, sample_index=None, axes=None, step_pace=None, first_ax_title=None):
         import matplotlib.pyplot as plt
@@ -562,10 +559,11 @@ class SequentialDataSet(DataSet):
         sample_class = sequence_label if isinstance(sequence_label, str) else self.labels_names[sequence_label]
         _axes[0].set_title(first_ax_title.format(sample_index=sample_index, sample_class=sample_class))
 
-        step_pace = step_pace if step_pace is not None else self.units_per_sample / float(self.steps_per_sample)
+        step_pace = step_pace if step_pace is not None else self.units_per_sample / float(len(sequence_inputs))
         for dimension_index in range(num_features):
-            _axes[dimension_index].plot(np.array(range(steps_per_sample)) * step_pace,
-                                        sequence_inputs[:, dimension_index], label=self.features_names[dimension_index])
+            _axes[dimension_index].plot(x=np.array(range(steps_per_sample)) * step_pace,
+                                        y=sequence_inputs[:, dimension_index],
+                                        label=self.features_names[dimension_index])
             _axes[dimension_index].legend()
 
         if axes is None:
@@ -819,50 +817,128 @@ class DataSetsMerge(DataSet):
 
 class SequentialDataSetsMerge(DataSetsMerge, SequentialDataSet):
 
-    @property
-    def steps_per_sample(self):
-        return self.data_sets[0].shape[-2]
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.units_per_sample = self.data_sets[0].units_per_sample
+
+
+class EpochedRecordingDataSet(SequentialDataSet):
+
+    def __init__(self, recording_dimension=None, **kwargs):
+        super().__init__(**kwargs)
+        self.recording_dimension = recording_dimension
+        self.recording = self.full_recording
+        self.channels = self.channel_selection
+        self.epochs_labels = self.epochs_labeling
 
     @property
-    def units_per_sample(self):
-        return self.data_sets[0].units_per_sample
+    def full_recording(self):
+        pass
+
+    @property
+    def epochs_labeling(self):
+        pass
+
+    @property
+    def channel_selection(self):
+        pass
+
+    @property
+    def num_samples(self):
+        return len(self.epochs_labels)
+
+    @property
+    def num_features(self):
+        return len(self.channels)
+
+    @property
+    def features_names(self):
+        return np.array(super().features_names)[self.channels]
+
+    @property
+    def num_classes(self):
+        # Plus one since classes are considered to be enumerated from 0.
+        return np.array(self.epochs_labels)[:, self.labels_key].max() + 1
+
+    @property
+    def inputs(self):
+        return DataSubSet(data_key=self.inputs_key, complete_data_set=self)
+
+    @property
+    def labels(self):
+        return self.epochs_labels[:, self.labels_key]
+
+    def sample_at(self, index):
+        epoch_onset, label = self.epochs_labels[index]
+        is_last_epoch = (index + 1 == len(self.epochs_labels))
+        next_epoch_onset = len(self.recording) if is_last_epoch else self.epochs_labels[index + 1][self.inputs_key]
+        inputs = self.recording[self.channels, epoch_onset:next_epoch_onset]
+        return inputs if self.recording_dimension is None else inputs[self.recording_dimension], label
+
+    def remove_samples(self, samples_indices):
+        self.epochs_labels = np.delete(self.epochs_labels, samples_indices, 0)
+
+    def _replace_labels(self, mapping, samples_indices=None):
+        if samples_indices is None:
+            self.epochs_labels = np.array([(onset, mapping.get(label, label))
+                                           for onset, label in self.epochs_labels])
+        else:
+            self.epochs_labels = np.array([(onset, mapping.get(label, label) if index in samples_indices else label)
+                                           for index, (onset, label) in enumerate(self.epochs_labels)])
 
 
-class EpochEegExperimentDataSet(SequentialDataSet):
+class FixedLengthSequentialDataSet(EpochedRecordingDataSet):
+
+    def __init__(self, steps_per_sample=None, **kwargs):
+        super().__init__(**kwargs)
+        if steps_per_sample is None:
+            from scipy.stats import mode
+            self.steps_per_sample = mode(np.diff(np.array(self.epochs_labels)[:, self.inputs_key])).mode[0]
+        else:
+            self.steps_per_sample = steps_per_sample
+
+        # If there is a next onset(to compare with) and it's steps_per_sample ahead, then it's a valid epoch.
+        self.epochs_labels = np.array([(onset, label) for onset_index, (onset, label) in enumerate(self.epochs_labels)
+                                       if onset_index + 1 < len(self.epochs_labels)
+                                       and (self.epochs_labels[onset_index + 1][0] - onset) == self.steps_per_sample])
+
+
+class EpochEegExperimentDataSet(FixedLengthSequentialDataSet):
 
     def __init__(self, files_folder_path, epoch_duration, low_frequencies_cut=None, high_frequencies_cut=None,
                  transformation=None, mne_picks_types_args={'eeg': True, 'eog': False, 'emg': False, 'stim': False},
                  mne_pick_channels_args=None, **kwargs):
-        super().__init__(**kwargs)
         self.files_folder_path = files_folder_path
         self.epoch_duration = epoch_duration
         self.low_frequencies_cut = low_frequencies_cut
         self.high_frequencies_cut = high_frequencies_cut
-
-        self.valid_samples = self.validate_samples(self.signal_classification)
-
-        import mne
-        eeg_signals = self.eeg_signals
-        self.picks = np.arange(len(eeg_signals.ch_names))
-
-        if mne_picks_types_args is not None:
-            pick_types_selection = mne.pick_types(eeg_signals.info, **mne_picks_types_args)
-            self.picks = np.array(list(filter(lambda channel_index: channel_index in pick_types_selection, self.picks)))
-
-        if mne_pick_channels_args is not None:
-            pick_channels_selection = mne.pick_channels(eeg_signals.ch_names, **mne_pick_channels_args)
-            self.picks = np.array(list(filter(lambda channel_index: channel_index in pick_channels_selection,
-                                              self.picks)))
+        self.mne_picks_types_args = mne_picks_types_args
+        self.mne_pick_channels_args = mne_pick_channels_args
 
         self.transformation = transformation if not isinstance(transformation, str) \
             else self._build_transformation(transformation)
+        super().__init__(features_names=self.full_recording.ch_names, recording_dimension=0, **kwargs)
 
-    def validate_samples(self, signal_classification, labels_mapping={}):
-        # If there is a next onset(to compare with) and it's steps_per_sample ahead, then is a valid epoch.
-        return np.array([(onset, labels_mapping.get(label, label))
-                         for onset_index, (onset, label) in enumerate(signal_classification)
-                         if onset_index + 1 < len(signal_classification)
-                         and (signal_classification[onset_index + 1][0] - onset) == self.steps_per_sample])
+    @property
+    def full_recording(self):
+        import mne
+        set_filename = list_folder_files_with_extension(self.files_folder_path, 'set')[0]
+        complete_experiment_recording = mne.io.read_raw_eeglab(input_fname=set_filename, preload=False, eog='auto')
+        return complete_experiment_recording
+
+    @property
+    def channel_selection(self):
+        import mne
+        eeg_signals = self.full_recording
+        picks = np.arange(len(eeg_signals.ch_names))
+        if self.mne_picks_types_args is not None:
+            pick_types_selection = mne.pick_types(eeg_signals.info, **self.mne_picks_types_args)
+            picks = np.array(list(filter(lambda channel_index: channel_index in pick_types_selection, picks)))
+        if self.mne_pick_channels_args is not None:
+            pick_channels_selection = mne.pick_channels(eeg_signals.ch_names, **self.mne_pick_channels_args)
+            picks = np.array(list(filter(lambda channel_index: channel_index in pick_channels_selection, picks)))
+
+        return picks
 
     def _build_transformation(self, transformation):
         if transformation == 'standardization':
@@ -873,41 +949,8 @@ class EpochEegExperimentDataSet(SequentialDataSet):
         raise NotImplementedError()
 
     @property
-    def units_per_sample(self):
-        return self.epoch_duration
-
-    @property
-    def eeg_signals(self):
-        import mne
-        set_filename = list_folder_files_with_extension(self.files_folder_path, 'set')[0]
-        complete_experiment_recording = mne.io.read_raw_eeglab(input_fname=set_filename, preload=False, eog='auto')
-        return complete_experiment_recording
-
-    @property
     def signal_classification(self):
         pass
-
-    @property
-    def num_samples(self):
-        return len(self.valid_samples)
-
-    @property
-    def steps_per_sample(self):
-        return int(self.eeg_signals.info.get('sfreq')) * self.epoch_duration
-
-    @property
-    def num_features(self):
-        return len(self.picks)
-
-    @property
-    def features_names(self):
-        # Omit stim channel
-        return np.array(self.eeg_signals.ch_names)[self.picks]
-
-    @property
-    def num_classes(self):
-        # Plus one since classes are considered to be enumerated from 0.
-        return np.array(self.valid_samples)[:, self.labels_key].max() + 1
 
     def _transform_raw_signal_data(self, raw_data):
         import mne
@@ -918,35 +961,11 @@ class EpochEegExperimentDataSet(SequentialDataSet):
         # Feature transformation(standardization or others).
         return self.transformation.transform(result) if self.transformation is not None else result
 
-    @property
-    def inputs(self):
-        return DataSubSet(data_key=self.inputs_key, complete_data_set=self)
-
-    @property
-    def labels(self):
-        return self.valid_samples[:, self.labels_key]
-
-    def sample_at(self, index):
-        onset, label = self.valid_samples[index]
-        inputs = self._transform_raw_signal_data(self.eeg_signals[self.picks, onset:onset + self.steps_per_sample][0])
-        return inputs, label
-
-    def remove_samples(self, samples_indices):
-        self.valid_samples = np.delete(self.valid_samples, samples_indices, 0)
-
-    def _replace_labels(self, mapping, samples_indices=None):
-        if samples_indices is None:
-            self.valid_samples = np.array([(onset, mapping.get(label, label))
-                                           for onset, label in self.valid_samples])
-        else:
-            self.valid_samples = np.array([(onset, mapping.get(label, label) if index in samples_indices else label)
-                                           for index, (onset, label) in enumerate(self.valid_samples)])
-
 
 class FmedLfaEegExperimentData(EpochEegExperimentDataSet):
 
     @property
-    def signal_classification(self):
+    def epochs_labeling(self):
         import scipy.io
         mat_filename = list_folder_files_with_extension(self.files_folder_path, 'mat')[0]
         labels_data = scipy.io.loadmat(mat_filename)['stageData'][0][0]
