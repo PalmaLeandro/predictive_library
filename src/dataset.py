@@ -886,6 +886,19 @@ class EpochedRecordingDataSet(SequentialDataSet):
             self.epochs_labels = np.array([(onset, mapping.get(label, label) if index in samples_indices else label)
                                            for index, (onset, label) in enumerate(self.epochs_labels)])
 
+    def split_epochs(self, proportion):
+        new_epochs_labels = []
+        for sample_index, (epoch_onset, label) in enumerate(self.epochs_labels):
+            next_index = sample_index + 1
+            next_onset = self.epochs_labels[next_index][self.inputs_key] if next_index < len(self.epochs_labels) \
+                         else len(self.recording)
+            sample_length = next_onset - epoch_onset
+            epoch_splits_length = sample_length // proportion
+            for epoch_split_number in range(sample_length // epoch_splits_length):
+                new_epochs_labels.append((epoch_onset + epoch_split_number * epoch_splits_length, label))
+
+        self.epochs_labels = np.array(new_epochs_labels)
+
 
 class FixedLengthSequentialDataSet(EpochedRecordingDataSet):
 
